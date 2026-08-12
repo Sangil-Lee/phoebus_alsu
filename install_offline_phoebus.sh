@@ -50,7 +50,7 @@ TOP="${SC_SCRIPT%/*}"
 ## stage still exists and is used by 'bundle' on the machine which has the
 ## network, it is simply not part of a default run.
 ALL_STAGES=(pkgs java kafka elastic install topics service verify)
-EXTRA_STAGES=(bundle build paths exist status uninstall)
+EXTRA_STAGES=(bundle src build paths exist status uninstall)
 NOSUDO_STAGES=(paths exist status)
 
 ## Bundle : written by the 'bundle' stage, consumed by every other one
@@ -63,6 +63,14 @@ WITH_PKGS="true"                 # --no-pkgs   : leave the OS packages out
 WITH_JDK="true"                  # --with-jdk=no : leave the Temurin JDK out
 FORCE_OS="false"                 # --force-os  : ignore a distribution mismatch
 BUNDLE_PACK="true"               # --no-pack   : do not create the tar.gz
+
+## Where the Phoebus source comes from, used by 'bundle' and 'build' on the
+## machine which has the network. The offline machine never needs it.
+SRC_REPO_FORK="https://github.com/Sangil-Lee/phoebus"
+SRC_REPO_UPSTREAM="https://github.com/ControlSystemStudio/phoebus"
+SRC_REPO=""                      # --src-repo=fork | upstream | URL
+SRC_REF="master"                 # --src-ref=BRANCH|TAG|COMMIT
+SRC_DIR=""                       # --src-dir=PATH , where the source lives
 
 JDK_MAJOR="17"                   # Phoebus needs JDK 17 or later
 JAVA_ENV_PREFIX="/opt/java-env"  # where a downloaded JDK / Maven go
@@ -246,6 +254,7 @@ STAGES (default : all of them, in this order)
   These ones are never part of a default run :
 
   bundle    Collect everything an offline machine needs (needs the network)
+  src       Clone the Phoebus source, used by 'bundle'
   build     Build Phoebus with Maven, used by 'bundle'
   paths     Print every path, port and setting in use            (no sudo)
   exist     Check what is installed and what is missing          (no sudo)
@@ -265,6 +274,15 @@ OPTIONS
       --no-pack              Leave the bundle unpacked, no tar.gz
       --force-os             Install a bundle built on another distribution,
                              its OS packages are then ignored
+
+      --src-repo=WHICH       Where 'bundle' takes the source from :
+                               fork      ${SRC_REPO_FORK}
+                               upstream  ${SRC_REPO_UPSTREAM}
+                               or any git URL
+                             Default : the origin of the checkout this script
+                             sits in, ${SRC_REPO_FORK} when there is none.
+      --src-ref=REF          Branch, tag or commit to build (default : ${SRC_REF})
+      --src-dir=PATH         Where the source lives, ./phoebus-src by default
 
       --config=NAME          Alarm configuration and Kafka topic (default : ${ALARM_CONFIG})
       --user=NAME            Account running the alarm services (default : ${PHOEBUS_USER})
@@ -299,7 +317,15 @@ INSTALLATION IN DETAIL
 
   0. bundle    on the machine with internet access
 
-     Builds Phoebus first when there is no build output yet, then collects :
+     Fetches the source and builds Phoebus first when there is no build output
+     yet. --src-repo picks the repository, 'fork' and 'upstream' being
+     shortcuts for the two usual ones, --src-ref a branch, a tag or a commit :
+
+         ./${SC_NAME} bundle --src-repo=upstream --src-dir=~/phoebus-upstream
+         ./${SC_NAME} bundle --src-repo=fork --src-ref=v5.0.0
+
+     A checkout this script already sits in is used as is and keeps its own
+     origin. Then it collects :
 
        dist/       what Maven produced. product-*.tar.gz for the desktop,
                    service-alarm-server-*-bin.tar.gz which carries the thin
@@ -312,8 +338,9 @@ INSTALLATION IN DETAIL
                    Maven : the JDK is a tarball and nothing is built on the
                    target. --no-pkgs leaves them out when the target machine
                    has its own mirror.
-       manifest.txt  distribution, major version, architecture, the commit
-                   the artifacts were built from, and every version
+       manifest.txt  distribution, major version, architecture, the
+                   repository, the reference and the commit the artifacts
+                   were built from, and every version
 
      An interrupted run continues, the parts which are already complete are
      kept. About 1.7 GB in total.
@@ -487,6 +514,8 @@ EXAMPLES BY PURPOSE
     ./${SC_NAME} bundle --bundle-dir=/data/phoebus-2026-08
     ./${SC_NAME} bundle --no-pkgs                # the target has its own mirror
     ./${SC_NAME} bundle --with-jdk=no            # the target has a JDK already
+    ./${SC_NAME} bundle --src-repo=upstream --src-dir=~/phoebus-upstream
+    ./${SC_NAME} bundle --src-repo=fork --src-ref=v5.0.0
     tar tzf phoebus-bundle.tar.gz | head         # what is inside
     cat phoebus-bundle/manifest.txt              # versions, commit, distribution
 
@@ -545,6 +574,9 @@ function parse_args
             --with-jdk=*)            [[ "${1#*=}" =~ ^(no|false|0)$ ]] && WITH_JDK="false" || WITH_JDK="true" ;;
             --no-pack)               BUNDLE_PACK="false" ;;
             --force-os)              FORCE_OS="true" ;;
+            --src-repo=*)            SRC_REPO="${1#*=}";        OPT_SET[SRC_REPO]=1 ;;
+            --src-ref=*)             SRC_REF="${1#*=}";         OPT_SET[SRC_REF]=1 ;;
+            --src-dir=*)             SRC_DIR="${1#*=}";         OPT_SET[SRC_DIR]=1 ;;
             --config=*)              ALARM_CONFIG="${1#*=}";    OPT_SET[ALARM_CONFIG]=1 ;;
             --user=*)                PHOEBUS_USER="${1#*=}" ; OPT_SET[PHOEBUS_USER]=1 ;;
             --prefix=*)              PHOEBUS_PREFIX="${1#*=}" ;;
@@ -681,7 +713,7 @@ function artifact
         ## pattern so the plan stays readable
         [[ -z "${f}" && "${DRY_RUN}" == "true" ]] && f="${BUNDLE_WORK}/dist/${bundle_glob}"
     else
-        f="$(compgen -G "${TOP}/${build_glob}" | head -1 || true)"
+        f="$(compgen -G "${SRC_DIR}/${build_glob}" | head -1 || true)"
     fi
     printf '%s' "${f}"
     return 0
@@ -778,7 +810,7 @@ function bundle_dist
         run cp -f "${f}" "${dest}/"
     done
     if [[ "${WITH_DESKTOP}" == "true" ]]; then
-        f="$(compgen -G "${TOP}/phoebus-product/target/product-*.tar.gz" | head -1)" \
+        f="$(compgen -G "${SRC_DIR}/phoebus-product/target/product-*.tar.gz" | head -1)" \
             || die "no product tarball, the build did not produce everything"
         run cp -f "${f}" "${dest}/"
     fi
@@ -800,8 +832,9 @@ function stage_bundle
 
     ## 1. the artifacts, built here when they are not there yet
     ensure_java_known
-    if ! compgen -G "${TOP}/services/alarm-server/target/service-alarm-server-*-bin.tar.gz" >/dev/null; then
-        info "no build output yet, building first"
+    if ! compgen -G "${SRC_DIR}/services/alarm-server/target/service-alarm-server-*-bin.tar.gz" >/dev/null; then
+        info "no build output yet, fetching the source and building first"
+        stage_src
         stage_build
     fi
     bundle_dist "${dest}/dist"
@@ -826,8 +859,10 @@ os_id=${OS_ID}
 os_major=${OS_MAJOR}
 os_pretty=${OS_PRETTY}
 arch=$(uname -m)
-phoebus_version=$(basename "$(compgen -G "${TOP}/phoebus-product/target/product-*.jar" | head -1)" .jar | sed 's/^product-//')
-src_commit=$(git -C "${TOP}" log --oneline -1 2>/dev/null || echo unknown)
+phoebus_version=$(basename "$(compgen -G "${SRC_DIR}/phoebus-product/target/product-*.jar" | head -1)" .jar | sed 's/^product-//')
+src_repo=${SRC_REPO}
+src_ref=${SRC_REF}
+src_commit=$(git -C "${SRC_DIR}" log --oneline -1 2>/dev/null || echo unknown)
 jdk_major=${JDK_MAJOR}
 kafka_version=${KAFKA_VER}
 es_version=${ES_VER}
@@ -1385,18 +1420,107 @@ WantedBy=multi-user.target
 }
 
 ## ----------------------------------------------------------------------------
+## Phoebus source : the repository it comes from and where it lives
+## ----------------------------------------------------------------------------
+function is_phoebus_src
+{
+    local dir="$1"
+    [[ -r "${dir}/pom.xml" && -d "${dir}/phoebus-product" && -d "${dir}/services" ]]
+}
+
+## 'fork' and 'upstream' are shortcuts for the two repositories a site normally
+## picks between, anything else is taken as a git URL.
+function resolve_src_repo
+{
+    case "${SRC_REPO}" in
+        fork|FORK)         SRC_REPO="${SRC_REPO_FORK}" ;;
+        upstream|UPSTREAM) SRC_REPO="${SRC_REPO_UPSTREAM}" ;;
+    esac
+}
+
+## Decide which directory holds the source and which repository it belongs to :
+## 1. --src-dir when it was given
+## 2. the directory of this script when it already is a checkout
+## 3. ./phoebus-src otherwise, which the 'src' stage clones
+function resolve_src
+{
+    resolve_src_repo
+
+    if [[ -z "${SRC_DIR}" ]]; then
+        if is_phoebus_src "${TOP}"; then
+            SRC_DIR="${TOP}"
+        else
+            SRC_DIR="${PWD}/phoebus-src"
+        fi
+    fi
+
+    ## Without --src-repo, an existing checkout keeps its own origin : running
+    ## the installer inside a clone must not silently point it somewhere else.
+    if [[ -z "${SRC_REPO}" ]]; then
+        if [[ -d "${SRC_DIR}/.git" ]] && command -v git >/dev/null 2>&1; then
+            SRC_REPO="$(git -C "${SRC_DIR}" remote get-url origin 2>/dev/null || echo "${SRC_REPO_FORK}")"
+        else
+            SRC_REPO="${SRC_REPO_FORK}"
+        fi
+    fi
+    return 0
+}
+
+function stage_src
+{
+    banner "Stage : src - the Phoebus source"
+
+    if is_phoebus_src "${SRC_DIR}"; then
+        ok "source : ${SRC_DIR}"
+        if [[ -d "${SRC_DIR}/.git" ]] && command -v git >/dev/null 2>&1; then
+            local origin; origin="$(git -C "${SRC_DIR}" remote get-url origin 2>/dev/null || echo unknown)"
+            print_kv "origin" "${origin}"
+            print_kv "checked out" "$(git -C "${SRC_DIR}" log --oneline -1 2>/dev/null || echo unknown)"
+
+            ## a different repository was asked for : say so instead of
+            ## rewriting the remote of a tree which may carry local work
+            if [[ -n "${OPT_SET[SRC_REPO]:-}" && "${origin}" != "${SRC_REPO}" ]]; then
+                warn "this checkout follows ${origin}, not the requested ${SRC_REPO}"
+                warn "clone the other one somewhere else :"
+                warn "    ./${SC_NAME} --src-repo=${SRC_REPO} --src-dir=/path/to/new/clone src"
+            fi
+            ## an explicit --src-ref is checked out, otherwise the tree is left alone
+            if [[ -n "${OPT_SET[SRC_REF]:-}" ]]; then
+                info "checking out ${SRC_REF}"
+                try_sh "git -C '${SRC_DIR}' fetch --all --tags" || warn "git fetch failed, using what is there"
+                run_sh "git -C '${SRC_DIR}' checkout '${SRC_REF}'"
+                try_sh "git -C '${SRC_DIR}' pull --ff-only" || true
+            fi
+        fi
+        return 0
+    fi
+
+    [[ "${DRY_RUN}" == "true" ]] && { info "would clone ${SRC_REPO} (${SRC_REF}) into ${SRC_DIR}"; return 0; }
+    command -v git >/dev/null 2>&1 || die "git is needed to clone the source, run './${SC_NAME} pkgs' first"
+
+    info "cloning ${SRC_REPO} (${SRC_REF}) into ${SRC_DIR}"
+    try_sh "git clone --branch '${SRC_REF}' '${SRC_REPO}' '${SRC_DIR}'" \
+        || run_sh "git clone '${SRC_REPO}' '${SRC_DIR}' && git -C '${SRC_DIR}' checkout '${SRC_REF}'"
+    is_phoebus_src "${SRC_DIR}" || die "${SRC_DIR} does not look like a Phoebus source tree after the clone"
+    ok "source : ${SRC_DIR}  ($(git -C "${SRC_DIR}" log --oneline -1 2>/dev/null || echo unknown))"
+    return 0
+}
+
+## ----------------------------------------------------------------------------
 ## Maven build
 ## ----------------------------------------------------------------------------
 function mvn_run
 {
     local opts="${MAVEN_NET_OPTS} ${MAVEN_USER_OPTS}"
-    try_sh "cd '${TOP}' && JAVA_HOME='${JAVA_HOME_DETECTED}' '${MAVEN_HOME_DETECTED}/bin/mvn' ${opts} $*"
+    try_sh "cd '${SRC_DIR}' && JAVA_HOME='${JAVA_HOME_DETECTED}' '${MAVEN_HOME_DETECTED}/bin/mvn' ${opts} $*"
 }
 
 function stage_build
 {
     banner "Stage : build - Maven build of Phoebus"
 
+    is_phoebus_src "${SRC_DIR}" \
+        || die "no Phoebus source in ${SRC_DIR}, run './${SC_NAME} src' first"
     ensure_java_known
     local skip=""
     [[ "${SKIP_TESTS}" == "true" ]] && skip="-DskipTests"
@@ -1413,12 +1537,12 @@ function stage_build
     [[ "${DRY_RUN}" == "true" ]] && return 0
 
     local missing=()
-    compgen -G "${TOP}/services/alarm-server/target/service-alarm-server-*.jar" >/dev/null || missing+=("alarm-server")
-    compgen -G "${TOP}/services/alarm-logger/target/service-alarm-logger-*.jar" >/dev/null || missing+=("alarm-logger")
+    compgen -G "${SRC_DIR}/services/alarm-server/target/service-alarm-server-*.jar" >/dev/null || missing+=("alarm-server")
+    compgen -G "${SRC_DIR}/services/alarm-logger/target/service-alarm-logger-*.jar" >/dev/null || missing+=("alarm-logger")
     [[ "${WITH_CONFIG_LOGGER}" == "true" ]] && \
-        { compgen -G "${TOP}/services/alarm-config-logger/target/service-alarm-config-logger-*.jar" >/dev/null || missing+=("alarm-config-logger"); }
+        { compgen -G "${SRC_DIR}/services/alarm-config-logger/target/service-alarm-config-logger-*.jar" >/dev/null || missing+=("alarm-config-logger"); }
     [[ "${WITH_DESKTOP}" == "true" ]] && \
-        { compgen -G "${TOP}/phoebus-product/target/product-*.jar" >/dev/null || missing+=("phoebus-product"); }
+        { compgen -G "${SRC_DIR}/phoebus-product/target/product-*.jar" >/dev/null || missing+=("phoebus-product"); }
 
     (( ${#missing[@]} > 0 )) && die "the build produced no jar for : ${missing[*]}"
     ok "every jar was produced"
@@ -1531,7 +1655,7 @@ function stage_install
     if [[ -n "${BUNDLE_WORK}" ]]; then
         install_service_from_bundle_tar "alarm-server" "service-alarm-server-*-bin.tar.gz"
     else
-        install_service_jar "alarm-server" "${TOP}/services/alarm-server/target/service-alarm-server-*.jar"
+        install_service_jar "alarm-server" "${SRC_DIR}/services/alarm-server/target/service-alarm-server-*.jar"
     fi
 
     ## Phoebus settings file : PV connectivity and the alarm configuration.
@@ -1632,7 +1756,7 @@ function install_desktop_product
         return 0
     fi
 
-    local target="${TOP}/phoebus-product/target"
+    local target="${SRC_DIR}/phoebus-product/target"
     [[ -d "${target}" ]] || die "${target} does not exist, run './${SC_NAME} build'"
     ## product jar, its lib directory and the documentation
     run_sh "sudo cp -a '${target}'/product-*.jar '${PHOEBUS_PREFIX}/'"
@@ -1965,10 +2089,11 @@ function stage_paths
     banner "Stage : paths - where everything is"
 
     printf '%sBuild%s\n' "${C_BLU}" "${C_OFF}"
-    print_kv "source (this repo)"  "${TOP}"
+    print_kv "source"             "${SRC_DIR}"
+    print_kv "source repository"  "${SRC_REPO} (${SRC_REF})"
     print_kv "JAVA_HOME"           "$(find_system_jdk 2>/dev/null || echo 'not found')"
     print_kv "MAVEN_HOME"          "$( [[ -x "${JAVA_ENV_PREFIX}/MAVEN/bin/mvn" ]] && echo "${JAVA_ENV_PREFIX}/MAVEN" || command -v mvn || echo 'not found')"
-    print_kv "target platform"     "${TOP}/dependencies/target/lib"
+    print_kv "target platform"     "${SRC_DIR}/dependencies/target/lib"
 
     printf '\n%sAlarm services%s\n' "${C_BLU}" "${C_OFF}"
     print_kv "installation"        "${SERVICES_PREFIX}"
@@ -2019,12 +2144,12 @@ function stage_exist
     ## dependencies/target is wiped by the root 'clean install', so its absence
     ## says nothing : the built jars below are the meaningful check
     if [[ "${WITH_DESKTOP}" == "true" ]]; then
-        compgen -G "${TOP}/phoebus-product/target/product-*.jar" >/dev/null \
+        compgen -G "${SRC_DIR}/phoebus-product/target/product-*.jar" >/dev/null \
             && print_state "product jar" ok "phoebus-product/target" \
             || print_state "product jar" no "not built, run : ./${SC_NAME} build"
     fi
 
-    compgen -G "${TOP}/services/alarm-server/target/service-alarm-server-*.jar" >/dev/null \
+    compgen -G "${SRC_DIR}/services/alarm-server/target/service-alarm-server-*.jar" >/dev/null \
         && print_state "built jars" ok "services/*/target/service-*.jar" \
         || print_state "built jars" no "not built, run : ./${SC_NAME} build"
 
@@ -2171,8 +2296,8 @@ function main
     info "stages     : ${REQUESTED_STAGES[*]}"
     info "log file   : ${LOG_FILE}"
 
-    [[ -n "${BUNDLE}" || -r "${TOP}/pom.xml" ]] \
-        || die "no --bundle given and no pom.xml next to the script : run this from the phoebus source tree, or pass a bundle"
+    resolve_src
+    [[ -n "${BUNDLE}" ]] && info "installing from a bundle, the source is not needed"
 
     detect_os
     if stages_are_read_only; then
