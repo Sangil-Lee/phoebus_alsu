@@ -19,6 +19,7 @@
 #      phoebus-alarm-server.service    alarm states, needs Kafka
 #      phoebus-alarm-logger.service    alarm archive, needs Kafka + Elasticsearch
 #      phoebus-alarm-config-logger.service   configuration history, needs Kafka
+      phoebus-save-and-restore.service      snapshots, needs Elasticsearch
 #
 #  The Phoebus product itself is a JavaFX desktop application, not a service :
 #  it is installed with a launcher and a desktop entry.
@@ -64,6 +65,8 @@ KAFKA_PORT="9092"
 ES_HOST="localhost"
 ES_PORT="9200"
 ALARM_LOGGER_PORT="9000"         # server.port of the alarm logger REST service
+SAVE_RESTORE_PORT="9100"         # server.port of the save-and-restore service
+SAVE_RESTORE_PATH="/save-restore"  # server.servlet.contextPath of that service
 ALARM_CONFIG_LOGGER_PORT="8081"  # spring boot port of the configuration logger
 ALARM_CONFIG_REPO="/var/lib/phoebus/alarm-config-repo"   # local git repo of the config logger
 
@@ -87,6 +90,7 @@ EPICS_ADDR_LIST=""               # org.phoebus.pv.ca/addr_list, empty : auto
 EPICS_AUTO_ADDR_LIST="true"
 
 WITH_CONFIG_LOGGER="true"        # --no-config-logger disables it
+WITH_SAVE_RESTORE="true"         # --no-save-restore disables it
 WITH_DESKTOP="true"              # --no-desktop skips the JavaFX product
 SKIP_TESTS="true"                # the build runs with -DskipTests by default
 OPEN_FIREWALL="false"
@@ -108,6 +112,8 @@ declare -A OPT_SET=()
 
 ## The systemd units this script owns, in start order
 ALARM_UNITS=(phoebus-alarm-server.service phoebus-alarm-logger.service phoebus-alarm-config-logger.service)
+## save-and-restore only needs Elasticsearch, it is not part of the alarm chain
+SR_UNITS=(phoebus-save-and-restore.service)
 INFRA_UNITS=(kafka.service elasticsearch.service)
 
 ## ----------------------------------------------------------------------------
@@ -250,6 +256,8 @@ OPTIONS
       --prefix=PATH          Where the desktop product goes      (default : ${PHOEBUS_PREFIX})
       --services-prefix=PATH Where the services go               (default : ${SERVICES_PREFIX})
       --no-config-logger     Do not install the alarm configuration logger
+      --no-save-restore      Do not install the save-and-restore service
+      --save-restore-port=N  Its REST port (default : ${SAVE_RESTORE_PORT})
       --no-desktop           Do not install the JavaFX desktop product
 
       --kafka-version=VER    Apache Kafka version    (default : ${KAFKA_VER})
@@ -381,6 +389,15 @@ INSTALLATION IN DETAIL
                              per alarm configuration. 'remote.location' is
                              left empty, nothing is pushed anywhere.
 
+       save-and-restore/     a Spring Boot jar again, and the one service
+                             which needs only Elasticsearch. Its properties
+                             are added to the ones inside the jar with
+                             spring.config.additional-location, never with
+                             spring.config.location, which would replace them
+                             and drop the index names, the context path and
+                             the LDAP settings. REST on ${SAVE_RESTORE_PORT}${SAVE_RESTORE_PATH},
+                             indices saveandrestore_*.
+
      The desktop product goes to ${PHOEBUS_PREFIX} with its settings.ini,
      a launcher in /usr/local/bin/phoebus and a desktop entry.
      ${PHOEBUS_PREFIX}/settings.ini is the reference settings file of the
@@ -505,6 +522,7 @@ EXAMPLES BY PURPOSE
     ./${SC_NAME}                                   # defaults, asks nothing but sudo
     ./${SC_NAME} -y --config=Accelerator           # unattended
     ./${SC_NAME} -y --no-desktop                   # a headless service machine
+    ./${SC_NAME} -y --no-save-restore              # alarm services only
     ./${SC_NAME} -y --pv-default=pva               # PV Access instead of Channel Access
     ./${SC_NAME} -y --addr-list='10.0.0.255' --no-auto-addr-list
 
@@ -512,6 +530,7 @@ EXAMPLES BY PURPOSE
     ./${SC_NAME} exist
     ./${SC_NAME} status
     curl http://localhost:${ALARM_LOGGER_PORT}/                 # alarm logger REST
+    curl http://localhost:${SAVE_RESTORE_PORT}${SAVE_RESTORE_PATH}/       # save-and-restore REST
     curl http://localhost:${ES_PORT}/_cluster/health?pretty     # elasticsearch
 
   Rebuild and redeploy after a source change
@@ -549,6 +568,8 @@ function parse_args
             --prefix=*)              PHOEBUS_PREFIX="${1#*=}" ;;
             --services-prefix=*)     SERVICES_PREFIX="${1#*=}" ;;
             --no-config-logger)      WITH_CONFIG_LOGGER="false" ;;
+            --no-save-restore)       WITH_SAVE_RESTORE="false" ;;
+            --save-restore-port=*)   SAVE_RESTORE_PORT="${1#*=}" ;;
             --no-desktop)            WITH_DESKTOP="false" ;;
             --kafka-version=*)       KAFKA_VER="${1#*=}" ;;
             --kafka-prefix=*)        KAFKA_PREFIX="${1#*=}" ;;
@@ -588,6 +609,7 @@ function parse_args
     if [[ "${WITH_CONFIG_LOGGER}" != "true" ]]; then
         ALARM_UNITS=(phoebus-alarm-server.service phoebus-alarm-logger.service)
     fi
+    [[ "${WITH_SAVE_RESTORE}" == "true" ]] || SR_UNITS=()
 }
 
 function stages_are_read_only
@@ -1172,6 +1194,8 @@ function stage_build
     compgen -G "${SRC_DIR}/services/alarm-logger/target/service-alarm-logger-*.jar" >/dev/null || missing+=("alarm-logger")
     [[ "${WITH_CONFIG_LOGGER}" == "true" ]] && \
         { compgen -G "${SRC_DIR}/services/alarm-config-logger/target/service-alarm-config-logger-*.jar" >/dev/null || missing+=("alarm-config-logger"); }
+    [[ "${WITH_SAVE_RESTORE}" == "true" ]] && \
+        { compgen -G "${SRC_DIR}/services/save-and-restore/target/service-save-and-restore-*.jar" >/dev/null || missing+=("save-and-restore"); }
     [[ "${WITH_DESKTOP}" == "true" ]] && \
         { compgen -G "${SRC_DIR}/phoebus-product/target/product-*.jar" >/dev/null || missing+=("phoebus-product"); }
 
@@ -1320,6 +1344,27 @@ password=
 "
     fi
 
+    ## --- save and restore ---------------------------------------------------
+    ## A Spring Boot jar again, but this one takes its configuration through
+    ## spring.config.additional-location : 'location' alone would replace the
+    ## application.properties inside the jar and drop the index names, the
+    ## context path and the LDAP settings which are not repeated here.
+    if [[ "${WITH_SAVE_RESTORE}" == "true" ]]; then
+        install_service_jar "save-and-restore" "${SRC_DIR}/services/save-and-restore/target/service-save-and-restore-*.jar"
+        write_root_file "${SERVICES_PREFIX}/save-and-restore/save_restore.properties" "\
+# Generated by ${SC_NAME} on $(date '+%Y-%m-%d %H:%M:%S')
+# Added to the defaults of the jar with spring.config.additional-location
+
+server.port=${SAVE_RESTORE_PORT}
+server.servlet.contextPath=${SAVE_RESTORE_PATH}
+
+elasticsearch.network.host=${ES_HOST}
+elasticsearch.http.port=${ES_PORT}
+
+logging.level.org.springframework=WARN
+"
+    fi
+
     ## --- desktop product ----------------------------------------------------
     if [[ "${WITH_DESKTOP}" == "true" ]]; then
         install_desktop_product
@@ -1378,6 +1423,13 @@ org.phoebus.applications.alarm/config_names=${ALARM_CONFIG}
 # REST service of the alarm logger, used by the \"Alarm Log Table\"
 org.phoebus.applications.alarm.logging.ui/service_uri=http://${ES_HOST}:${ALARM_LOGGER_PORT}
 org.phoebus.applications.alarm.logging.ui/results_max_size=10000
+
+###################################################
+# Package org.phoebus.applications.saveandrestore.client
+###################################################
+
+# REST service of save-and-restore
+org.phoebus.applications.saveandrestore.client/jmasar.service.url=http://localhost:${SAVE_RESTORE_PORT}${SAVE_RESTORE_PATH}
 
 ###################################################
 # Package org.phoebus.pv and org.phoebus.pv.ca
@@ -1506,6 +1558,34 @@ WantedBy=multi-user.target
 "
     fi
 
+    if [[ "${WITH_SAVE_RESTORE}" == "true" ]]; then
+        write_root_file /etc/systemd/system/phoebus-save-and-restore.service "\
+# Generated by ${SC_NAME}
+[Unit]
+Description=Phoebus Save and Restore service
+Documentation=https://github.com/ControlSystemStudio/phoebus/tree/master/services/save-and-restore
+After=network.target elasticsearch.service
+Requires=elasticsearch.service
+
+[Service]
+Type=simple
+User=${PHOEBUS_USER}
+Group=${PHOEBUS_USER}
+WorkingDirectory=${SERVICES_PREFIX}/save-and-restore
+Environment=JAVA_HOME=${JAVA_HOME_DETECTED}
+ExecStart=${JAVA_HOME_DETECTED}/bin/java \\
+          -Dspring.config.additional-location=file:${SERVICES_PREFIX}/save-and-restore/save_restore.properties \\
+          -jar ${SERVICES_PREFIX}/save-and-restore/save-and-restore.jar
+# a JVM stopped with SIGTERM exits 143, that is a clean shutdown
+SuccessExitStatus=143
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+"
+    fi
+
     run sudo systemctl daemon-reload
     ok "the systemd units are installed"
 }
@@ -1571,8 +1651,24 @@ function stage_service
     ensure_java_known
     run sudo systemctl daemon-reload
 
+    ## Kafka and Elasticsearch are Type=simple : systemd calls them started as
+    ## soon as the process exists, long before they accept a connection. The
+    ## services which depend on them try to connect at startup, so wait for the
+    ## ports instead of relying on the unit ordering alone.
     local unit
-    for unit in "${INFRA_UNITS[@]}" "${ALARM_UNITS[@]}"; do
+    for unit in "${INFRA_UNITS[@]}"; do
+        [[ -e "/etc/systemd/system/${unit}" ]] || { warn "${unit} is not installed, skipped"; continue; }
+        run sudo systemctl enable "${unit}"
+        run sudo systemctl restart "${unit}"
+        ok "${unit} started"
+    done
+    [[ -e /etc/systemd/system/kafka.service ]] && \
+        { wait_for_port "${KAFKA_HOST}" "${KAFKA_PORT}" 90 "Kafka" || warn "Kafka is not answering yet"; }
+    [[ -e /etc/systemd/system/elasticsearch.service ]] && \
+        { wait_for_port "${ES_HOST}" "${ES_PORT}" 180 "Elasticsearch" || warn "Elasticsearch is not answering yet"; }
+
+    for unit in "${ALARM_UNITS[@]}" "${SR_UNITS[@]:-}"; do
+        [[ -n "${unit}" ]] || continue
         [[ -e "/etc/systemd/system/${unit}" ]] || { warn "${unit} is not installed, skipped"; continue; }
         run sudo systemctl enable "${unit}"
         run sudo systemctl restart "${unit}"
@@ -1644,8 +1740,14 @@ function stage_verify
         && ok "the alarm logger REST service answers on ${ALARM_LOGGER_PORT}" \
         || warn "the alarm logger does not answer, check 'systemctl status phoebus-alarm-logger.service'"
 
+    if [[ "${WITH_SAVE_RESTORE}" == "true" ]]; then
+        wait_for_port "localhost" "${SAVE_RESTORE_PORT}" 120 "save-and-restore" \
+            && ok "save-and-restore answers on http://localhost:${SAVE_RESTORE_PORT}${SAVE_RESTORE_PATH}" \
+            || warn "save-and-restore does not answer, check 'systemctl status phoebus-save-and-restore.service'"
+    fi
+
     local unit
-    for unit in "${INFRA_UNITS[@]}" "${ALARM_UNITS[@]}"; do
+    for unit in "${INFRA_UNITS[@]}" "${ALARM_UNITS[@]}" "${SR_UNITS[@]:-}"; do
         [[ -e "/etc/systemd/system/${unit}" ]] || continue
         [[ "$(systemctl is-active "${unit}" 2>/dev/null)" == "active" ]] \
             && print_state "${unit}" ok "active" \
@@ -1680,6 +1782,12 @@ function stage_paths
         print_kv "config logger"   "${SERVICES_PREFIX}/alarm-config-logger/alarm_config_logger.properties"
         print_kv "config git repo" "${ALARM_CONFIG_REPO}"
     fi
+    if [[ "${WITH_SAVE_RESTORE}" == "true" ]]; then
+        printf '\n%sSave and restore%s\n' "${C_BLU}" "${C_OFF}"
+        print_kv "service"         "${SERVICES_PREFIX}/save-and-restore/save_restore.properties"
+        print_kv "REST"            "http://localhost:${SAVE_RESTORE_PORT}${SAVE_RESTORE_PATH}"
+        print_kv "elasticsearch"   "indices saveandrestore_*"
+    fi
 
     printf '\n%sThird party services%s\n' "${C_BLU}" "${C_OFF}"
     print_kv "Kafka"               "${KAFKA_PREFIX}  (${KAFKA_HOST}:${KAFKA_PORT}, KRaft, data ${KAFKA_DATA}, logs ${KAFKA_LOGS})"
@@ -1696,7 +1804,7 @@ function stage_paths
 
     printf '\n%sSystemd units%s\n' "${C_BLU}" "${C_OFF}"
     local unit
-    for unit in "${INFRA_UNITS[@]}" "${ALARM_UNITS[@]}"; do
+    for unit in "${INFRA_UNITS[@]}" "${ALARM_UNITS[@]}" "${SR_UNITS[@]:-}"; do
         print_kv "${unit}" "/etc/systemd/system/${unit}"
     done
     print_kv "install log" "${LOG_FILE}"
@@ -1736,8 +1844,9 @@ function stage_exist
         || print_state "Elasticsearch" no "missing, run : ./${SC_NAME} elastic"
 
     local name
-    for name in alarm-server alarm-logger alarm-config-logger; do
+    for name in alarm-server alarm-logger alarm-config-logger save-and-restore; do
         [[ "${name}" == "alarm-config-logger" && "${WITH_CONFIG_LOGGER}" != "true" ]] && continue
+        [[ "${name}" == "save-and-restore"   && "${WITH_SAVE_RESTORE}"  != "true" ]] && continue
         [[ -e "${SERVICES_PREFIX}/${name}/${name}.jar" ]] \
             && print_state "${name}" ok "${SERVICES_PREFIX}/${name}" \
             || print_state "${name}" no "not installed, run : ./${SC_NAME} install"
@@ -1750,7 +1859,7 @@ function stage_exist
     fi
 
     local unit state
-    for unit in "${INFRA_UNITS[@]}" "${ALARM_UNITS[@]}"; do
+    for unit in "${INFRA_UNITS[@]}" "${ALARM_UNITS[@]}" "${SR_UNITS[@]:-}"; do
         if [[ ! -e "/etc/systemd/system/${unit}" ]]; then
             print_state "${unit}" no "not installed"
             continue
@@ -1768,6 +1877,11 @@ function stage_exist
     [[ -n "$(curl -s -m 8 "http://localhost:${ALARM_LOGGER_PORT}/" 2>/dev/null)" ]] \
         && print_state "alarm logger http" ok "http://localhost:${ALARM_LOGGER_PORT}" \
         || print_state "alarm logger http" no "no answer"
+    if [[ "${WITH_SAVE_RESTORE}" == "true" ]]; then
+        [[ -n "$(curl -s -m 8 "http://localhost:${SAVE_RESTORE_PORT}${SAVE_RESTORE_PATH}/" 2>/dev/null)" ]] \
+            && print_state "save-and-restore http" ok "http://localhost:${SAVE_RESTORE_PORT}${SAVE_RESTORE_PATH}" \
+            || print_state "save-and-restore http" no "no answer"
+    fi
 
     printf '\n'
     return 0
@@ -1778,7 +1892,7 @@ function stage_status
     banner "Stage : status - systemd units"
 
     local unit
-    for unit in "${INFRA_UNITS[@]}" "${ALARM_UNITS[@]}"; do
+    for unit in "${INFRA_UNITS[@]}" "${ALARM_UNITS[@]}" "${SR_UNITS[@]:-}"; do
         [[ -e "/etc/systemd/system/${unit}" ]] || continue
         try systemctl --no-pager --full status "${unit}" || true
         printf '\n'
@@ -1836,6 +1950,7 @@ ${C_GRN}============================================================
   Kafka               : ${KAFKA_HOST}:${KAFKA_PORT}   (${KAFKA_PREFIX}, KRaft)
   Elasticsearch       : http://${ES_HOST}:${ES_PORT}   (${ES_PREFIX})
   Alarm logger REST   : http://localhost:${ALARM_LOGGER_PORT}
+  Save and restore    : $( [[ "${WITH_SAVE_RESTORE}" == "true" ]] && echo "http://localhost:${SAVE_RESTORE_PORT}${SAVE_RESTORE_PATH}" || echo "not installed" )
   Services            : ${SERVICES_PREFIX}
   Desktop product     : $( [[ "${WITH_DESKTOP}" == "true" ]] && echo "${PHOEBUS_PREFIX}  (run 'phoebus')" || echo "not installed" )
   Log file            : ${LOG_FILE}
