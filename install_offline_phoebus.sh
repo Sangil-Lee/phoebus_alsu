@@ -293,136 +293,123 @@ OPTIONS
 
 INSTALLATION IN DETAIL
 
-  Every stage is idempotent : running it again on an installed machine only
-  refreshes what changed. A full run takes 30 to 50 minutes, almost all of it
-  in the Maven build.
+  Every stage is idempotent : running it again only refreshes what changed.
+  The offline installation takes minutes, the bundle it consumes takes 30 to
+  50 minutes to build on the machine which has the network.
 
-  1. pkgs      the packages the build and the services need
+  0. bundle    on the machine with internet access
 
-     Debian : ca-certificates wget curl git tar unzip make gcc procps, plus
-     gtk3 / libXtst / mesa for the desktop product. Rocky : the same with
-     procps-ng and which. Nothing is pinned, the distribution decides.
+     Builds Phoebus first when there is no build output yet, then collects :
 
-         ./${SC_NAME} pkgs
+       dist/       what Maven produced. product-*.tar.gz for the desktop,
+                   service-alarm-server-*-bin.tar.gz which carries the thin
+                   jar together with the lib directory its manifest needs,
+                   and the two Spring Boot jars of the loggers. The
+                   settings.ini of ${PHOEBUS_PREFIX} travels along when it
+                   exists, so a site configuration reaches the target.
+       tarballs/   the Temurin JDK, Kafka ${KAFKA_VER} and Elasticsearch ${ES_VER}
+       pkgs/       the OS packages and their dependencies. No JDK and no
+                   Maven : the JDK is a tarball and nothing is built on the
+                   target. --no-pkgs leaves them out when the target machine
+                   has its own mirror.
+       manifest.txt  distribution, major version, architecture, the commit
+                   the artifacts were built from, and every version
 
-  2. java      a JDK ${JDK_MAJOR} or later, and Apache Maven
+     An interrupted run continues, the parts which are already complete are
+     kept. About 1.7 GB in total.
 
-     An installed JDK is reused : ${JAVA_ENV_PREFIX}/JDK first, then
-     /usr/lib/jvm. When none is recent enough the distribution package is
-     tried (openjdk-N-jdk / java-N-openjdk-devel), and an Eclipse Temurin
-     tarball is the last resort. Maven is taken from PATH, then from
-     ${JAVA_ENV_PREFIX}/MAVEN, otherwise ${MAVEN_VER} is downloaded and its
-     sha512 checked. JavaFX is not needed in the JDK, it arrives as a Maven
-     dependency.
+         ./${SC_NAME} bundle
+         ./${SC_NAME} bundle --bundle-dir=/data/phoebus-2026-08 --no-pkgs
 
-         ./${SC_NAME} java
-         ./${SC_NAME} --jdk-major=21 java        # ask for a newer JDK
+  Everything below runs on the machine without internet access, against
+  --bundle. Without a bundle these stages behave like install_phoebus.sh and
+  reach out to the network instead.
+
+  1. pkgs      the OS packages, from the bundle
+
+     'dnf install --disablerepo=*' on the bundled rpms, 'dpkg -i' on the
+     debs. They only fit a machine of the same distribution, major version
+     and architecture as the one which built the bundle, which the manifest
+     records and this script checks. On a mismatch it stops, or ignores the
+     packages with --force-os and leaves them to your mirror.
+
+  2. java      a JDK ${JDK_MAJOR} or later, from the bundle
+
+     An installed JDK is reused, otherwise the Temurin tarball of the bundle
+     is unpacked into ${JAVA_ENV_PREFIX}/JDK. Maven is never needed here,
+     nothing is compiled on this machine.
 
   3. kafka     Apache Kafka ${KAFKA_VER} in KRaft mode, no Zookeeper
 
-     The tarball goes to ${KAFKA_PREFIX}, owned by the '${KAFKA_USER}' system
-     account. The broker is both controller and broker, node id 1, listening
-     on ${KAFKA_HOST}:${KAFKA_PORT} with the controller on 9093. Topic data
-     lives in ${KAFKA_DATA} and Kafka's own log4j output in ${KAFKA_LOGS} :
-     the two must stay apart, the LogManager reads every directory inside
-     ${KAFKA_DATA} as a topic partition and refuses to start otherwise.
-     The storage is formatted once with a generated cluster id, a second run
-     leaves the existing data alone.
-
-         ./${SC_NAME} kafka
-         ./${SC_NAME} --kafka-version=3.9.1 --kafka-host=kafka.site.org kafka
+     The tarball comes from the bundle and goes to ${KAFKA_PREFIX}, owned by
+     the '${KAFKA_USER}' account. Broker and controller in one process,
+     listening on ${KAFKA_HOST}:${KAFKA_PORT}. Topic data lives in
+     ${KAFKA_DATA} and Kafka's own log4j output in ${KAFKA_LOGS} : the two
+     must stay apart, the LogManager reads every directory inside
+     ${KAFKA_DATA} as a topic partition and refuses to start otherwise. The
+     storage is formatted once, a second run keeps the existing data.
 
   4. elastic   Elasticsearch ${ES_VER}, a single node
 
-     The tarball goes to ${ES_PREFIX}, owned by '${ES_USER}', with data in
-     ${ES_DATA} and logs in ${ES_LOGS}. The node binds to ${ES_HOST} only,
-     which keeps Elasticsearch in development mode so the bootstrap checks
-     are skipped, and security is switched off : the alarm logger talks to it
-     without credentials. Elasticsearch brings its own JDK, JAVA_HOME is not
-     used. Open it to a network and you have to turn security back on.
+     From the bundle into ${ES_PREFIX}, owned by '${ES_USER}', data in
+     ${ES_DATA}, logs in ${ES_LOGS}. It binds to ${ES_HOST} only, which keeps
+     the node in development mode so the bootstrap checks are skipped, and
+     security is off : the alarm logger talks to it without credentials.
+     Elasticsearch brings its own JDK.
 
-         ./${SC_NAME} elastic
-         curl 'http://${ES_HOST}:${ES_PORT}/_cluster/health?pretty'
+  5. install   the services, their settings and the product
 
-  5. build     the Maven build, the long one
+     Each distribution is extracted straight into its destination, never
+     through a temporary directory : 'cp -a tmp/. dest/' would stamp the mode
+     and the owner of that temporary directory onto dest.
 
-     Two steps, the same ones run_maven.sh performs :
-
-         mvn clean verify -f dependencies/pom.xml     the target platform
-         mvn -DskipTests clean install                everything else
-
-     Roughly 25 to 45 minutes on a first run, most of it downloading. The
-     stage fails if any expected jar is missing afterwards. Large artifacts
-     are retried, --maven-opts adds JVM safe options (-D... only, they also
-     reach the JVM through MAVEN_OPTS).
-
-         ./${SC_NAME} build
-         ./${SC_NAME} --with-tests build          # run the unit tests too
-
-  6. install   the services, their settings and the product
-
-     Creates the '${PHOEBUS_USER}' account and fills ${SERVICES_PREFIX} :
-
-       alarm-server/         service-alarm-server-*.jar plus its lib/
-                             directory. This one is a thin jar, its manifest
-                             carries 'Class-Path: lib/...', so the 47
-                             dependency jars are installed next to it.
-                             alarm_settings.ini holds the PV and alarm
-                             preferences, passed with -settings.
-       alarm-logger/         a Spring Boot jar, needs no lib directory.
-                             alarm_logger.properties holds the Kafka topics,
-                             the Elasticsearch host and the REST port
-                             ${ALARM_LOGGER_PORT}, passed with -properties.
-       alarm-config-logger/  a Spring Boot jar and its properties. The
+       alarm-server/         the jar and its lib directory, alarm_settings.ini
+                             passed with -settings
+       alarm-logger/         the Spring Boot jar, alarm_logger.properties
+                             passed with -properties, REST on ${ALARM_LOGGER_PORT}
+       alarm-config-logger/  the Spring Boot jar and its properties, the
                              configuration history is committed into
-                             ${ALARM_CONFIG_REPO}/<config>, a git repository
-                             per alarm configuration. 'remote.location' is
-                             left empty, nothing is pushed anywhere.
+                             ${ALARM_CONFIG_REPO}/<config>, one git repository
+                             per alarm configuration, nothing is pushed
+                             anywhere until remote.location is set
 
-     The desktop product goes to ${PHOEBUS_PREFIX} with its settings.ini,
-     a launcher in /usr/local/bin/phoebus and a desktop entry.
-     ${PHOEBUS_PREFIX}/settings.ini is the reference settings file of the
-     installation, phoebus.sh passes it with -settings.
+     The desktop product is unpacked into ${PHOEBUS_PREFIX} with a launcher
+     in /usr/local/bin/phoebus and a desktop entry.
+     ${PHOEBUS_PREFIX}/settings.ini is the reference settings file, and every
+     value which is not given on the command line is read back from it, so a
+     partial run never resets what the site configured.
 
-     Then the five systemd units are written. The alarm units are ordered
-     server -> logger -> config-logger with After=, so the chain holds when
-     the machine boots, and all of them declare SuccessExitStatus=143
-     because a JVM stopped with SIGTERM exits with that code.
+     Then the five systemd units. The alarm units are ordered server ->
+     logger -> config-logger with After=, so the chain holds when the machine
+     boots, and all of them declare SuccessExitStatus=143 because a JVM
+     stopped with SIGTERM exits with that code.
 
-         ./${SC_NAME} install
-         ./${SC_NAME} --no-desktop install        # a headless service machine
+  6. topics    the Kafka topics of the alarm configuration
 
-  7. topics    the Kafka topics of the alarm configuration
+     Starts the broker and creates ${ALARM_CONFIG} compacted, plus
+     ${ALARM_CONFIG}Command and ${ALARM_CONFIG}Talk with a short retention,
+     with the settings of app/alarm/examples/create_alarm_topics.sh. Existing
+     topics are left untouched.
 
-     Starts the broker and creates three topics, with the settings of
-     app/alarm/examples/create_alarm_topics.sh :
-
-       ${ALARM_CONFIG}          compacted, the alarm state and configuration
-       ${ALARM_CONFIG}Command   deleted after a short retention
-       ${ALARM_CONFIG}Talk      deleted after a short retention
-
-     Existing topics are left untouched, so a second alarm configuration is
-     simply another run.
-
-         ./${SC_NAME} topics
-         ./${SC_NAME} --config=Injector topics install service
-
-  8. service   enable and start everything, in order
+  7. service   enable and start everything, in order
 
      kafka, elasticsearch, then the three alarm services.
 
-         ./${SC_NAME} service
-         ./${SC_NAME} --open-firewall service     # open ${KAFKA_PORT} ${ES_PORT} ${ALARM_LOGGER_PORT}
-
-  9. verify    does the stack answer
+  8. verify    does the stack answer
 
      Waits for ${KAFKA_PORT}, ${ES_PORT} and ${ALARM_LOGGER_PORT}, prints the
      cluster health and the state of the five units.
 
+  build        only on the machine which builds the bundle
+
+     Not part of a default run here. 'bundle' calls it when there is no build
+     output yet, and --maven-opts and --with-tests apply to it.
+
 AFTER THE INSTALLATION
 
-  An empty alarm configuration is of no use, so import one. The XML follows
-  app/alarm/examples/alarm_configuration.xsd :
+  An empty alarm configuration is of no use, so import one. On an offline
+  machine that XML has to travel with the bundle, it is not part of it. The
+  format follows app/alarm/examples/alarm_configuration.xsd :
 
       <config name="${ALARM_CONFIG}">
         <component name="Test">
@@ -488,6 +475,10 @@ WHAT ENDS UP WHERE
                                   /etc/systemd/system/phoebus-alarm-logger.service
                                   /etc/systemd/system/phoebus-alarm-config-logger.service
   installation log                ${LOG_FILE}
+
+  The bundle itself is not installed anywhere : a tarball is unpacked into a
+  temporary directory, read, and removed when the run ends. Keep the bundle
+  which installed a machine, it pins the exact artifacts that machine runs.
 
 EXAMPLES BY PURPOSE
 
