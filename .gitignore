@@ -126,3 +126,6 @@ docs/source/applications.rst
 docs/source/preference_properties.rst
 docs/source/services.rst
 
+
+# log file of install_phoebus.sh
+install_phoebus.log
