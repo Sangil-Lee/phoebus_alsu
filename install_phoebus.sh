@@ -249,6 +249,204 @@ OPTIONS
 
   -h, --help                 This message
 
+INSTALLATION IN DETAIL
+
+  Every stage is idempotent : running it again on an installed machine only
+  refreshes what changed. A full run takes 30 to 50 minutes, almost all of it
+  in the Maven build.
+
+  1. pkgs      the packages the build and the services need
+
+     Debian : ca-certificates wget curl git tar unzip make gcc procps, plus
+     gtk3 / libXtst / mesa for the desktop product. Rocky : the same with
+     procps-ng and which. Nothing is pinned, the distribution decides.
+
+         ./${SC_NAME} pkgs
+
+  2. java      a JDK ${JDK_MAJOR} or later, and Apache Maven
+
+     An installed JDK is reused : ${JAVA_ENV_PREFIX}/JDK first, then
+     /usr/lib/jvm. When none is recent enough the distribution package is
+     tried (openjdk-N-jdk / java-N-openjdk-devel), and an Eclipse Temurin
+     tarball is the last resort. Maven is taken from PATH, then from
+     ${JAVA_ENV_PREFIX}/MAVEN, otherwise ${MAVEN_VER} is downloaded and its
+     sha512 checked. JavaFX is not needed in the JDK, it arrives as a Maven
+     dependency.
+
+         ./${SC_NAME} java
+         ./${SC_NAME} --jdk-major=21 java        # ask for a newer JDK
+
+  3. kafka     Apache Kafka ${KAFKA_VER} in KRaft mode, no Zookeeper
+
+     The tarball goes to ${KAFKA_PREFIX}, owned by the '${KAFKA_USER}' system
+     account. The broker is both controller and broker, node id 1, listening
+     on ${KAFKA_HOST}:${KAFKA_PORT} with the controller on 9093. Topic data
+     lives in ${KAFKA_DATA} and Kafka's own log4j output in ${KAFKA_LOGS} :
+     the two must stay apart, the LogManager reads every directory inside
+     ${KAFKA_DATA} as a topic partition and refuses to start otherwise.
+     The storage is formatted once with a generated cluster id, a second run
+     leaves the existing data alone.
+
+         ./${SC_NAME} kafka
+         ./${SC_NAME} --kafka-version=3.9.1 --kafka-host=kafka.site.org kafka
+
+  4. elastic   Elasticsearch ${ES_VER}, a single node
+
+     The tarball goes to ${ES_PREFIX}, owned by '${ES_USER}', with data in
+     ${ES_DATA} and logs in ${ES_LOGS}. The node binds to ${ES_HOST} only,
+     which keeps Elasticsearch in development mode so the bootstrap checks
+     are skipped, and security is switched off : the alarm logger talks to it
+     without credentials. Elasticsearch brings its own JDK, JAVA_HOME is not
+     used. Open it to a network and you have to turn security back on.
+
+         ./${SC_NAME} elastic
+         curl 'http://${ES_HOST}:${ES_PORT}/_cluster/health?pretty'
+
+  5. build     the Maven build, the long one
+
+     Two steps, the same ones run_maven.sh performs :
+
+         mvn clean verify -f dependencies/pom.xml     the target platform
+         mvn -DskipTests clean install                everything else
+
+     Roughly 25 to 45 minutes on a first run, most of it downloading. The
+     stage fails if any expected jar is missing afterwards. Large artifacts
+     are retried, --maven-opts adds JVM safe options (-D... only, they also
+     reach the JVM through MAVEN_OPTS).
+
+         ./${SC_NAME} build
+         ./${SC_NAME} --with-tests build          # run the unit tests too
+
+  6. install   the services, their settings and the product
+
+     Creates the '${PHOEBUS_USER}' account and fills ${SERVICES_PREFIX} :
+
+       alarm-server/         service-alarm-server-*.jar plus its lib/
+                             directory. This one is a thin jar, its manifest
+                             carries 'Class-Path: lib/...', so the 47
+                             dependency jars are installed next to it.
+                             alarm_settings.ini holds the PV and alarm
+                             preferences, passed with -settings.
+       alarm-logger/         a Spring Boot jar, needs no lib directory.
+                             alarm_logger.properties holds the Kafka topics,
+                             the Elasticsearch host and the REST port
+                             ${ALARM_LOGGER_PORT}, passed with -properties.
+       alarm-config-logger/  a Spring Boot jar and its properties. The
+                             configuration history is committed into
+                             ${ALARM_CONFIG_REPO}/<config>, a git repository
+                             per alarm configuration. 'remote.location' is
+                             left empty, nothing is pushed anywhere.
+
+     The desktop product goes to ${PHOEBUS_PREFIX} with its settings.ini,
+     a launcher in /usr/local/bin/phoebus and a desktop entry.
+     ${PHOEBUS_PREFIX}/settings.ini is the reference settings file of the
+     installation, phoebus.sh passes it with -settings.
+
+     Then the five systemd units are written. The alarm units are ordered
+     server -> logger -> config-logger with After=, so the chain holds when
+     the machine boots, and all of them declare SuccessExitStatus=143
+     because a JVM stopped with SIGTERM exits with that code.
+
+         ./${SC_NAME} install
+         ./${SC_NAME} --no-desktop install        # a headless service machine
+
+  7. topics    the Kafka topics of the alarm configuration
+
+     Starts the broker and creates three topics, with the settings of
+     app/alarm/examples/create_alarm_topics.sh :
+
+       ${ALARM_CONFIG}          compacted, the alarm state and configuration
+       ${ALARM_CONFIG}Command   deleted after a short retention
+       ${ALARM_CONFIG}Talk      deleted after a short retention
+
+     Existing topics are left untouched, so a second alarm configuration is
+     simply another run.
+
+         ./${SC_NAME} topics
+         ./${SC_NAME} --config=Injector topics install service
+
+  8. service   enable and start everything, in order
+
+     kafka, elasticsearch, then the three alarm services.
+
+         ./${SC_NAME} service
+         ./${SC_NAME} --open-firewall service     # open ${KAFKA_PORT} ${ES_PORT} ${ALARM_LOGGER_PORT}
+
+  9. verify    does the stack answer
+
+     Waits for ${KAFKA_PORT}, ${ES_PORT} and ${ALARM_LOGGER_PORT}, prints the
+     cluster health and the state of the five units.
+
+AFTER THE INSTALLATION
+
+  An empty alarm configuration is of no use, so import one. The XML follows
+  app/alarm/examples/alarm_configuration.xsd :
+
+      <config name="${ALARM_CONFIG}">
+        <component name="Test">
+          <pv name="TEST:TEMP">
+            <description>Test analog temperature</description>
+            <enabled>true</enabled>
+            <latching>false</latching>
+          </pv>
+        </component>
+      </config>
+
+  The import writes into the Kafka topic, so stop the server first :
+
+      sudo systemctl stop phoebus-alarm-server
+      cd ${SERVICES_PREFIX}/alarm-server
+      sudo -u ${PHOEBUS_USER} java -jar alarm-server.jar \\
+           -settings alarm_settings.ini -config ${ALARM_CONFIG} \\
+           -import my_config.xml -noshell
+      sudo systemctl start phoebus-alarm-server
+
+  Checking the whole chain with a soft IOC, the way this installer was
+  verified. Records need alarm limits, for instance an ai with HIGH / HIHI
+  and HSV / HHSV, then :
+
+      softIoc -S -d alarmtest.db &
+      caput TEST:TEMP 9                      # above HIHI, a MAJOR alarm
+
+  and the alarm has to show up in three places :
+
+      # the alarm server published it to Kafka
+      ${KAFKA_PREFIX}/bin/kafka-console-consumer.sh --bootstrap-server \\
+          ${KAFKA_HOST}:${KAFKA_PORT} --topic ${ALARM_CONFIG} --from-beginning \\
+          --property print.key=true --max-messages 10
+
+      # the alarm logger wrote it to Elasticsearch
+      curl 'http://${ES_HOST}:${ES_PORT}/_cat/indices?v'
+      curl 'http://${ES_HOST}:${ES_PORT}/*alarms_state*/_search?pretty&size=5'
+
+      # the configuration logger committed the configuration itself
+      sudo -u ${PHOEBUS_USER} git -C ${ALARM_CONFIG_REPO}/${ALARM_CONFIG} log --oneline
+
+  Channel Access reaches the IOCs listed in
+  ${PHOEBUS_PREFIX}/settings.ini and in
+  ${SERVICES_PREFIX}/alarm-server/alarm_settings.ini. Both are generated by
+  --addr-list, and a machine whose EPICS_CA_AUTO_ADDR_LIST is 'no' will not
+  find a local IOC unless 127.0.0.1 is in that list.
+
+WHAT ENDS UP WHERE
+
+  desktop product, settings.ini   ${PHOEBUS_PREFIX}
+  desktop launcher                /usr/local/bin/phoebus
+  alarm services and settings     ${SERVICES_PREFIX}
+  alarm configuration history     ${ALARM_CONFIG_REPO}  (git, one per configuration)
+  Kafka                           ${KAFKA_PREFIX}
+  Kafka topic data                ${KAFKA_DATA}
+  Kafka log4j output              ${KAFKA_LOGS}
+  Elasticsearch                   ${ES_PREFIX}
+  Elasticsearch data              ${ES_DATA}
+  Elasticsearch logs              ${ES_LOGS}
+  systemd units                   /etc/systemd/system/kafka.service
+                                  /etc/systemd/system/elasticsearch.service
+                                  /etc/systemd/system/phoebus-alarm-server.service
+                                  /etc/systemd/system/phoebus-alarm-logger.service
+                                  /etc/systemd/system/phoebus-alarm-config-logger.service
+  installation log                ${LOG_FILE}
+
 EXAMPLES BY PURPOSE
 
   Before installing : see what would happen, and where things would go
