@@ -129,3 +129,6 @@ docs/source/services.rst
 
 # log file of install_phoebus.sh
 install_phoebus.log
+
+# log file of install_offline_phoebus.sh
+install_offline_phoebus.log

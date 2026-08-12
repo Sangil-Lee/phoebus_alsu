@@ -494,20 +494,20 @@ function parse_args
             -n|--dry-run)            DRY_RUN="true" ;;
             --log-file=*)            LOG_FILE="${1#*=}" ;;
             --config=*)              ALARM_CONFIG="${1#*=}";    OPT_SET[ALARM_CONFIG]=1 ;;
-            --user=*)                PHOEBUS_USER="${1#*=}" ;;
+            --user=*)                PHOEBUS_USER="${1#*=}" ; OPT_SET[PHOEBUS_USER]=1 ;;
             --prefix=*)              PHOEBUS_PREFIX="${1#*=}" ;;
             --services-prefix=*)     SERVICES_PREFIX="${1#*=}" ;;
             --no-config-logger)      WITH_CONFIG_LOGGER="false" ;;
             --no-desktop)            WITH_DESKTOP="false" ;;
             --kafka-version=*)       KAFKA_VER="${1#*=}" ;;
             --kafka-prefix=*)        KAFKA_PREFIX="${1#*=}" ;;
-            --kafka-host=*)          KAFKA_HOST="${1#*=}" ;;
+            --kafka-host=*)          KAFKA_HOST="${1#*=}" ; OPT_SET[KAFKA_HOST]=1 ;;
             --es-version=*)          ES_VER="${1#*=}" ;;
             --es-prefix=*)           ES_PREFIX="${1#*=}" ;;
-            --es-host=*)             ES_HOST="${1#*=}" ;;
-            --pv-default=*)          EPICS_PV_DEFAULT="${1#*=}" ;;
-            --addr-list=*)           EPICS_ADDR_LIST="${1#*=}" ;;
-            --no-auto-addr-list)     EPICS_AUTO_ADDR_LIST="false" ;;
+            --es-host=*)             ES_HOST="${1#*=}" ; OPT_SET[ES_HOST]=1 ;;
+            --pv-default=*)          EPICS_PV_DEFAULT="${1#*=}" ; OPT_SET[EPICS_PV_DEFAULT]=1 ;;
+            --addr-list=*)           EPICS_ADDR_LIST="${1#*=}" ; OPT_SET[EPICS_ADDR_LIST]=1 ;;
+            --no-auto-addr-list)     EPICS_AUTO_ADDR_LIST="false"; OPT_SET[EPICS_AUTO_ADDR_LIST]=1 ;;
             --jdk-major=*)           JDK_MAJOR="${1#*=}" ;;
             --maven-opts=*)          MAVEN_USER_OPTS="${1#*=}" ;;
             --with-tests)            SKIP_TESTS="false" ;;
@@ -1069,11 +1069,49 @@ function install_service_jar
     ok "${name} : $(basename "${jar}")"
 }
 
+## The settings of an installation live in its settings.ini. A partial run such
+## as './SCRIPT install' must not reset what a site configured, so every value
+## which was not given on the command line is read back from the installed file,
+## or from the one the bundle carries.
+function seed_from_settings_file
+{
+    local file="" line key value
+    if [[ -n "${BUNDLE_WORK:-}" && -r "${BUNDLE_WORK}/dist/settings.ini" && ! -r "${PHOEBUS_PREFIX}/settings.ini" ]]; then
+        file="${BUNDLE_WORK}/dist/settings.ini"
+    elif [[ -r "${PHOEBUS_PREFIX}/settings.ini" ]]; then
+        file="${PHOEBUS_PREFIX}/settings.ini"
+    else
+        return 0
+    fi
+
+    while IFS= read -r line; do
+        [[ "${line}" =~ ^[[:space:]]*# || -z "${line}" ]] && continue
+        key="${line%%=*}"; value="${line#*=}"
+        case "${key}" in
+            org.phoebus.pv/default)
+                [[ -n "${OPT_SET[EPICS_PV_DEFAULT]:-}" ]] || EPICS_PV_DEFAULT="${value}" ;;
+            org.phoebus.pv.ca/addr_list)
+                [[ -n "${OPT_SET[EPICS_ADDR_LIST]:-}" ]] || EPICS_ADDR_LIST="${value}" ;;
+            org.phoebus.pv.ca/auto_addr_list)
+                [[ -n "${OPT_SET[EPICS_AUTO_ADDR_LIST]:-}" ]] || EPICS_AUTO_ADDR_LIST="${value}" ;;
+            org.phoebus.applications.alarm/config_name)
+                [[ -n "${OPT_SET[ALARM_CONFIG]:-}" ]] || ALARM_CONFIG="${value}" ;;
+            org.phoebus.applications.alarm/server)
+                if [[ -z "${OPT_SET[KAFKA_HOST]:-}" && "${value}" == *:* ]]; then
+                    KAFKA_HOST="${value%%:*}"; KAFKA_PORT="${value##*:}"
+                fi ;;
+        esac
+    done < "${file}"
+    info "settings kept from ${file}"
+    return 0
+}
+
 function stage_install
 {
     banner "Stage : install - product, services and their settings"
 
     ensure_java_known
+    seed_from_settings_file
     ensure_user "${PHOEBUS_USER}" "${SERVICES_PREFIX}"
     run sudo install -d "${SERVICES_PREFIX}"
 
