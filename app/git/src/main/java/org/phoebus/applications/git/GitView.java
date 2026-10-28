@@ -1,18 +1,24 @@
 package org.phoebus.applications.git;
 
 import java.io.File;
+import java.time.Duration;
 import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 import org.eclipse.jgit.api.errors.NotMergedException;
+import org.eclipse.jgit.lib.BatchingProgressMonitor;
 import org.eclipse.jgit.lib.Constants;
 import org.phoebus.applications.git.GitRepository.BranchInfo;
+import org.phoebus.applications.git.GitRepository.ChangeType;
+import org.phoebus.applications.git.GitRepository.CommitFile;
 import org.phoebus.applications.git.GitRepository.CommitInfo;
+import org.phoebus.applications.git.GitRepository.FileStatus;
 import org.phoebus.applications.git.GitRepository.RemoteBranch;
 import org.phoebus.applications.git.GitRepository.ResetMode;
 import org.phoebus.applications.git.GitRepository.State;
@@ -31,6 +37,8 @@ import org.phoebus.ui.docking.DockPane;
 import org.phoebus.ui.javafx.ImageCache;
 
 import javafx.application.Platform;
+import javafx.beans.value.ChangeListener;
+import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Alert.AlertType;
@@ -51,7 +59,9 @@ import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.GridPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
+import javafx.scene.layout.VBox;
 import javafx.stage.DirectoryChooser;
+import javafx.stage.Window;
 
 /** Dock tab for one repository
  *
@@ -71,6 +81,7 @@ public class GitView implements AppInstance
     /** Center area, shows file status, history or stash */
     private final BorderPane layout = new BorderPane();
     private final TextField repo_path = new TextField();
+    private final HBox repo_bar = new HBox(5);
     private final Button pull = new Button(Messages.Pull);
     private final Button push = new Button(Messages.Push);
     private final GitSidebar sidebar;
@@ -94,6 +105,22 @@ public class GitView implements AppInstance
     /** Number of running operations */
     private final AtomicInteger active = new AtomicInteger();
 
+    /** Time in millis when the last operation ended */
+    private volatile long last_activity = 0;
+
+    /** Changes within this time after an operation are caused by that operation */
+    private static final long OWN_CHANGES_MS = 1500;
+
+    /** Watches the repository for changes, <code>null</code> if not watching */
+    private RepositoryWatcher watcher = null;
+
+    private final DockItem tab;
+
+    /** Window that's checked for focus, to refresh when focused */
+    private Window focus_window = null;
+    private final ChangeListener<Boolean> focus_listener = (p, o, focused) -> focusChanged(focused);
+
+
     /** Most recent state, used to list branches for merge. Only accessed on UI thread */
     private State last_state = null;
 
@@ -111,11 +138,27 @@ public class GitView implements AppInstance
         SplitPane.setResizableWithParent(sidebar, false);
 
         final BorderPane content = new BorderPane(split);
-        content.setTop(createToolbar());
+        // Tool bar with operations, below that the repository location
+        content.setTop(new VBox(createToolbar(), createRepositoryBar()));
 
-        final DockItem tab = new DockItem(this, content);
+        tab = new DockItem(this, content);
         DockPane.getActiveDockPane().addTab(tab);
         tab.addClosedNotification(this::dispose);
+
+        // Refresh when tab is selected, or its window gets the focus
+        tab.selectedProperty().addListener((p, o, selected) ->
+        {
+            if (selected  &&  GitApp.auto_refresh)
+                refresh();
+        });
+        content.sceneProperty().addListener((p, o, scene) ->
+        {
+            if (scene != null)
+            {
+                scene.windowProperty().addListener((wp, wo, window) -> watchFocus(window));
+                watchFocus(scene.getWindow());
+            }
+        });
 
         if (directory != null)
             setRepository(directory);
@@ -147,12 +190,16 @@ public class GitView implements AppInstance
 
         repo_path.setPromptText(Messages.NoRepository);
         repo_path.setOnAction(event -> setRepository(new File(repo_path.getText().trim())));
-        repo_path.setPrefColumnCount(30);
+        repo_path.setPrefColumnCount(40);
         final Button browse = new Button(Messages.Browse);
         browse.setOnAction(event -> browse());
-        final HBox repo_box = new HBox(5, new Label(Messages.Repository), repo_path, browse);
-        repo_box.setAlignment(Pos.CENTER_RIGHT);
-        HBox.setHgrow(repo_box, Priority.ALWAYS);
+        final Button clone = new Button(Messages.Clone);
+        clone.setOnAction(event -> cloneRepository());
+        final Button create = new Button(Messages.NewRepository);
+        create.setOnAction(event -> createRepository());
+        repo_bar.getChildren().setAll(new Label(Messages.Repository), repo_path, browse, clone, create);
+        repo_bar.setAlignment(Pos.CENTER_LEFT);
+        repo_bar.setPadding(new Insets(2, 5, 4, 5));
         HBox.setHgrow(repo_path, Priority.ALWAYS);
 
         busy.setPrefSize(18, 18);
@@ -160,7 +207,66 @@ public class GitView implements AppInstance
         busy_label.setVisible(false);
 
         return new ToolBar(fetch, pull, push, new Separator(), branch, merge, tag, stash, new Separator(), refresh,
-                           busy, busy_label, repo_box);
+                           busy, busy_label);
+    }
+
+    /** @return Bar with repository location, kept separate from the tool bar so it is never in the overflow menu */
+    private HBox createRepositoryBar()
+    {
+        return repo_bar;
+    }
+
+    /** @param focused Did the window of this tab get the focus? */
+    private void focusChanged(final boolean focused)
+    {
+        if (focused  &&  tab.isSelected()  &&  GitApp.auto_refresh)
+            refresh();
+    }
+
+    /** @param window Window to check for focus, replacing the previous one */
+    private void watchFocus(final Window window)
+    {
+        if (focus_window == window)
+            return;
+        if (focus_window != null)
+            focus_window.focusedProperty().removeListener(focus_listener);
+        focus_window = window;
+        if (focus_window != null)
+            focus_window.focusedProperty().addListener(focus_listener);
+    }
+
+    /** Refresh after the repository changed, unless caused by our own operations */
+    private void autoRefresh()
+    {
+        if (active.get() == 0  &&  System.currentTimeMillis() - last_activity > OWN_CHANGES_MS)
+            refresh();
+    }
+
+    /** Watch current repository for changes */
+    private synchronized void startWatcher()
+    {
+        stopWatcher();
+        final GitRepository current = repo;
+        if (current == null  ||  ! GitApp.auto_refresh)
+            return;
+        try
+        {
+            watcher = new RepositoryWatcher(() -> current.getWatchDirectories(RepositoryWatcher.MAX_DIRECTORIES),
+                                            this::autoRefresh);
+        }
+        catch (Exception ex)
+        {
+            GitApp.logger.log(Level.WARNING, "Cannot watch " + current.getWorkTree(), ex);
+        }
+    }
+
+    private synchronized void stopWatcher()
+    {
+        if (watcher != null)
+        {
+            watcher.close();
+            watcher = null;
+        }
     }
 
     /** Run operation in background while showing the busy indicator
@@ -182,6 +288,7 @@ public class GitView implements AppInstance
             }
             finally
             {
+                last_activity = System.currentTimeMillis();
                 updateBusy(active.decrementAndGet(), null);
             }
         });
@@ -261,6 +368,12 @@ public class GitView implements AppInstance
         }
 
         @Override
+        public void showFileHistory(final String path)
+        {
+            GitView.this.showFileHistory(path);
+        }
+
+        @Override
         public void abortMerge()
         {
             if (confirm(Messages.AbortMerge, Messages.AbortMergeConfirm))
@@ -322,6 +435,18 @@ public class GitView implements AppInstance
         {
             sidebar.selectFileStatus();
         }
+
+        @Override
+        public void showFileHistory(final String path)
+        {
+            GitView.this.showFileHistory(path);
+        }
+    }
+
+    /** @param path File to show in a new 'file history' tab */
+    private void showFileHistory(final String path)
+    {
+        new FileHistoryView(() -> repo, path, ex -> showError(Messages.FileHistory, ex));
     }
 
     /** Handle side bar actions */
@@ -676,6 +801,125 @@ public class GitView implements AppInstance
         }
     }
 
+    /** Progress monitor that shows clone progress next to the busy indicator */
+    private class BusyProgress extends BatchingProgressMonitor
+    {
+        @Override
+        protected void onUpdate(final String task, final int done, final Duration duration)
+        {
+            show(task + " " + done);
+        }
+
+        @Override
+        protected void onEndTask(final String task, final int done, final Duration duration)
+        {
+            show(task + " " + done);
+        }
+
+        @Override
+        protected void onUpdate(final String task, final int done, final int total, final int percent,
+                                final Duration duration)
+        {
+            show(task + " " + percent + "%");
+        }
+
+        @Override
+        protected void onEndTask(final String task, final int done, final int total, final int percent,
+                                 final Duration duration)
+        {
+            show(task + " " + percent + "%");
+        }
+
+        private void show(final String text)
+        {
+            Platform.runLater(() -> busy_label.setText(text));
+        }
+    }
+
+    /** Prompt for URL and directory, clone, then open the clone */
+    private void cloneRepository()
+    {
+        final TextField url = new TextField();
+        url.setPrefColumnCount(40);
+        url.setPromptText("https://host/group/repo.git, git@host:group/repo.git");
+        final TextField parent = new TextField(System.getProperty("user.home"));
+        final Button browse_parent = new Button(Messages.Browse);
+        browse_parent.setOnAction(event ->
+        {
+            final DirectoryChooser chooser = new DirectoryChooser();
+            final File current = new File(parent.getText());
+            if (current.isDirectory())
+                chooser.setInitialDirectory(current);
+            final File dir = chooser.showDialog(url.getScene().getWindow());
+            if (dir != null)
+                parent.setText(dir.getAbsolutePath());
+        });
+        final TextField name = new TextField();
+        // Suggest directory name from the URL, ".../repo.git" -> "repo"
+        url.textProperty().addListener((p, o, text) ->
+        {
+            String suggestion = text.trim().replaceAll("/+$", "");
+            suggestion = suggestion.substring(Math.max(suggestion.lastIndexOf('/'), suggestion.lastIndexOf(':')) + 1);
+            if (suggestion.endsWith(".git"))
+                suggestion = suggestion.substring(0, suggestion.length() - 4);
+            name.setText(suggestion);
+        });
+        final GridPane grid = new GridPane();
+        grid.setHgap(5);
+        grid.setVgap(5);
+        grid.addRow(0, new Label(Messages.RemoteUrl), url);
+        grid.addRow(1, new Label(Messages.CloneParent), parent, browse_parent);
+        grid.addRow(2, new Label(Messages.CloneName), name);
+
+        final Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.setTitle(Messages.Clone);
+        dialog.setHeaderText(null);
+        dialog.getDialogPane().setContent(grid);
+        dialog.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
+        DialogHelper.positionDialog(dialog, layout, -200, -100);
+        Platform.runLater(url::requestFocus);
+        if (dialog.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK  ||
+            url.getText().isBlank()  ||  name.getText().isBlank())
+            return;
+
+        final String address = url.getText().trim();
+        final File directory = new File(parent.getText().trim(), name.getText().trim());
+        schedule(Messages.Clone, monitor ->
+        {
+            try
+            {
+                GitRepository.cloneRepository(address, directory, new GitCredentialsProvider(layout), new BusyProgress());
+                setRepository(directory);
+            }
+            catch (Exception ex)
+            {
+                showError(Messages.Clone, ex);
+            }
+        });
+    }
+
+    /** Prompt for directory, create new repository there and open it */
+    private void createRepository()
+    {
+        final DirectoryChooser chooser = new DirectoryChooser();
+        chooser.setTitle(Messages.NewRepository);
+        final File dir = chooser.showDialog(layout.getScene().getWindow());
+        if (dir == null)
+            return;
+        schedule(Messages.NewRepository, monitor ->
+        {
+            try
+            {
+                GitRepository.init(dir);
+                setRepository(dir);
+            }
+            catch (Exception ex)
+            {
+                showError(Messages.NewRepository, ex);
+            }
+        });
+    }
+
     private void browse()
     {
         final DirectoryChooser chooser = new DirectoryChooser();
@@ -699,6 +943,7 @@ public class GitView implements AppInstance
                 repo = new_repo;
                 if (old != null)
                     old.close();
+                startWatcher();
                 Platform.runLater(() ->
                 {
                     repo_path.setText(new_repo.getWorkTree().getAbsolutePath());
@@ -733,6 +978,25 @@ public class GitView implements AppInstance
         });
     }
 
+    /** @param status Staged and unstaged changes
+     *  @return Changed files compared to HEAD, one entry per file
+     */
+    private static List<CommitFile> getUncommittedFiles(final FileStatus status)
+    {
+        // A file can be staged and unstaged. Compared to HEAD, a new file stays 'added',
+        // otherwise the state of the work tree applies
+        final Map<String, ChangeType> files = new TreeMap<>();
+        for (StatusEntry entry : status.staged())
+            files.put(entry.path(), entry.type());
+        for (StatusEntry entry : status.unstaged())
+            if (files.get(entry.path()) != ChangeType.ADDED)
+                files.put(entry.path(), entry.type());
+        return files.entrySet()
+                    .stream()
+                    .map(entry -> new CommitFile(entry.getValue(), entry.getKey(), null))
+                    .toList();
+    }
+
     /** @param state Repository state to show */
     private void update(final State state)
     {
@@ -742,13 +1006,7 @@ public class GitView implements AppInstance
                                            .filter(BranchInfo::current)
                                            .map(b -> Constants.R_HEADS + b.name())
                                            .findFirst().orElse(null);
-        final List<String> changed = Stream.concat(state.status().staged().stream(),
-                                                                    state.status().unstaged().stream())
-                                                            .map(StatusEntry::path)
-                                                            .distinct()
-                                                            .sorted()
-                                                            .toList();
-        history.setCommits(state.log(), current_branch, log_count, changed);
+        history.setCommits(state.log(), current_branch, log_count, getUncommittedFiles(state.status()));
         stash_diff.clear();
         // Update side bar last, it may re-select a branch and thus a commit in the history
         sidebar.update(state);
@@ -819,6 +1077,8 @@ public class GitView implements AppInstance
 
     private void dispose()
     {
+        stopWatcher();
+        watchFocus(null);
         final GitRepository current = repo;
         repo = null;
         if (current != null)

@@ -12,8 +12,10 @@ public class Messages
     public static String AbortMergeConfirm;
     public static String AddRemote;
     public static String AllBranches;
+    public static String AllFiles;
     public static String Amend;
     public static String ApplyStash;
+    public static String Blame;
     public static String Branch;
     public static String BranchName;
     public static String Browse;
@@ -21,12 +23,17 @@ public class Messages
     public static String CheckoutNewBranch;
     public static String CheckoutRemote;
     public static String CherryPick;
+    public static String Clone;
+    public static String CloneName;
+    public static String CloneParent;
     public static String ColAuthor;
     public static String ColDate;
     public static String ColDescription;
     public static String ColId;
+    public static String ColMessage;
     public static String ColPath;
     public static String ColState;
+    public static String ColText;
     public static String Commit;
     public static String CommitMessagePrompt;
     public static String Commits;
@@ -49,6 +56,7 @@ public class Messages
     public static String EditRemote;
     public static String ErrorTitle;
     public static String Fetch;
+    public static String FileHistory;
     public static String FileStatus;
     public static String HeaderBranches;
     public static String HeaderRemotes;
@@ -62,8 +70,10 @@ public class Messages
     public static String MergeBranch;
     public static String MergeInto;
     public static String MergeIntoCurrent;
+    public static String NewRepository;
     public static String NoFastForward;
     public static String NoRepository;
+    public static String NotCommitted;
     public static String NotMerged;
     public static String PopStash;
     public static String Pull;

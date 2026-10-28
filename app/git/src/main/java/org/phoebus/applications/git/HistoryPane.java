@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
+import org.phoebus.applications.git.GitRepository.CommitFile;
 import org.phoebus.applications.git.GitRepository.CommitInfo;
 
 import javafx.beans.property.ReadOnlyObjectWrapper;
@@ -54,6 +55,8 @@ class HistoryPane extends BorderPane
         void loadMore();
         /** Show the uncommitted changes in the file status */
         void showFileStatus();
+        /** @param path File to show in the file history */
+        void showFileHistory(String path);
     }
 
     /** Id of the 'Uncommitted changes' row */
@@ -67,18 +70,21 @@ class HistoryPane extends BorderPane
 
     private final TableView<CommitInfo> history = new TableView<>();
     private final CheckBox all_branches = new CheckBox(Messages.AllBranches);
-    private final DiffPane diff;
+    private final CommitFilesPane details;
     private final Label count = new Label();
     private final Button load_more = new Button(Messages.LoadMore);
 
     /** Changed files, shown as 'Uncommitted changes' */
-    private List<String> uncommitted = List.of();
+    private List<CommitFile> uncommitted = List.of();
 
     /** Full name of checked out branch, used to highlight its label */
     private String current_branch = null;
 
     /** Width of the graph area */
     private int graph_width = 0;
+
+    /** Commits, their refs and the uncommitted files that are shown, to detect changes */
+    private List<String> signature = List.of();
 
     /** @param repo Provides the current repository
      *  @param on_error Error handler
@@ -88,7 +94,7 @@ class HistoryPane extends BorderPane
     HistoryPane(final Supplier<GitRepository> repo, final Consumer<Exception> on_error,
                 final boolean all, final Actions actions)
     {
-        diff = new DiffPane(repo, on_error);
+        details = new CommitFilesPane(repo, on_error, actions::showFileHistory);
 
         final TableColumn<CommitInfo, CommitInfo> description = new TableColumn<>(Messages.ColDescription);
         description.setPrefWidth(600);
@@ -107,12 +113,9 @@ class HistoryPane extends BorderPane
         history.getSelectionModel().selectedItemProperty().addListener((prop, old, commit) ->
         {
             if (isUncommitted(commit))
-            {
-                final List<String> paths = uncommitted;
-                diff.show(git -> git.getUncommittedDiff(paths));
-            }
+                details.showUncommitted(uncommitted);
             else if (commit != null)
-                diff.show(git -> git.getCommitDiff(commit.id()));
+                details.showCommit(commit.id());
         });
         // Double-click on 'Uncommitted changes' opens the file status to stage and commit
         history.setOnMouseClicked(event ->
@@ -131,7 +134,7 @@ class HistoryPane extends BorderPane
         options.setAlignment(Pos.CENTER_LEFT);
         options.setPadding(new Insets(5));
 
-        final SplitPane split = new SplitPane(history, diff);
+        final SplitPane split = new SplitPane(history, details);
         split.setOrientation(Orientation.VERTICAL);
         split.setDividerPositions(0.55);
 
@@ -181,8 +184,22 @@ class HistoryPane extends BorderPane
      *  @param changed Files with uncommitted changes, shown as first row
      */
     void setCommits(final List<CommitInfo> commits, final String current_branch,
-                    final int requested, final List<String> changed)
+                    final int requested, final List<CommitFile> changed)
     {
+        count.setText(String.format(Messages.Commits, commits.size()));
+        load_more.setVisible(commits.size() >= requested);
+
+        // When nothing changed, keep the table and its selection.
+        // Uncommitted files may still have new content, so their diff is updated
+        final List<String> new_signature = getSignature(commits, current_branch, changed);
+        if (new_signature.equals(signature))
+        {
+            if (isUncommitted(getSelected()))
+                details.showUncommitted(changed);
+            return;
+        }
+        signature = new_signature;
+
         this.current_branch = current_branch;
         this.uncommitted = changed;
         // Lanes are 14 pixels wide (JGit AbstractPlotRenderer), plus space for the dot.
@@ -200,7 +217,7 @@ class HistoryPane extends BorderPane
 
         // Keep selection of the same commit
         final CommitInfo selected = getSelected();
-        diff.clear();
+        details.clear();
         history.getItems().setAll(rows);
         if (selected != null)
             for (CommitInfo row : rows)
@@ -209,9 +226,24 @@ class HistoryPane extends BorderPane
                     history.getSelectionModel().select(row);
                     break;
                 }
+    }
 
-        count.setText(String.format(Messages.Commits, commits.size()));
-        load_more.setVisible(commits.size() >= requested);
+    /** @return Description of what's shown: Commits with refs, current branch, uncommitted files */
+    private static List<String> getSignature(final List<CommitInfo> commits, final String current_branch,
+                                             final List<CommitFile> changed)
+    {
+        final List<String> result = new ArrayList<>(commits.size() + changed.size() + 1);
+        result.add(String.valueOf(current_branch));
+        for (CommitInfo commit : commits)
+        {
+            final StringBuilder entry = new StringBuilder(commit.id());
+            for (int i=0; i<commit.plot().getRefCount(); ++i)
+                entry.append(' ').append(commit.plot().getRef(i).getName());
+            result.add(entry.toString());
+        }
+        for (CommitFile file : changed)
+            result.add(file.type() + ":" + file.path());
+        return result;
     }
 
     /** @param all Show all branches? Updates the check box, caller needs to refresh */
@@ -235,6 +267,6 @@ class HistoryPane extends BorderPane
                 return;
             }
         history.getSelectionModel().clearSelection();
-        diff.show(git -> git.getCommitDiff(id));
+        details.showCommit(id);
     }
 }

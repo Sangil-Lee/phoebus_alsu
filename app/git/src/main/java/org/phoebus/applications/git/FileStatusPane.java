@@ -50,6 +50,8 @@ class FileStatusPane extends BorderPane
         void getHeadMessage(Consumer<String> handler);
         /** Abort merge, cherry-pick or revert, after asking user */
         void abortMerge();
+        /** @param path File to show in the file history */
+        void showFileHistory(String path);
     }
 
     /** Row of a file table: Changed file and check box that stages/unstages it */
@@ -220,6 +222,9 @@ class FileStatusPane extends BorderPane
                                                               .toList()));
             menu.getItems().addAll(stage, discard);
         }
+        final MenuItem history = new MenuItem(Messages.FileHistory);
+        history.setOnAction(event -> actions.showFileHistory(table.getSelectionModel().getSelectedItem().entry.path()));
+        menu.getItems().add(history);
         menu.setOnShowing(event ->
         {
             final boolean none = table.getSelectionModel().isEmpty();
@@ -242,16 +247,25 @@ class FileStatusPane extends BorderPane
                 return;
             }
             setText(type.toString());
-            final String color = switch (type)
-            {
-                case ADDED     -> "#2e7d32";
-                case MODIFIED  -> "#e65100";
-                case DELETED   -> "#c62828";
-                case UNTRACKED -> "#757575";
-                case CONFLICT  -> "#6a1b9a";
-            };
+            final String color = getColor(type);
             setStyle("-fx-text-fill: " + color + "; -fx-font-weight: bold;");
         }
+    }
+
+    /** @param type Kind of change
+     *  @return Text color for showing the change
+     */
+    static String getColor(final ChangeType type)
+    {
+        return switch (type)
+        {
+            case ADDED     -> "#2e7d32";
+            case MODIFIED  -> "#e65100";
+            case DELETED   -> "#c62828";
+            case RENAMED   -> "#1565c0";
+            case UNTRACKED -> "#757575";
+            case CONFLICT  -> "#6a1b9a";
+        };
     }
 
     private void showDiff(final String path, final boolean is_staged)

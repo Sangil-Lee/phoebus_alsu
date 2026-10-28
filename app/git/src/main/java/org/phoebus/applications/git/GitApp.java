@@ -35,6 +35,9 @@ public class GitApp implements AppResourceDescriptor
     /** Timeout in seconds for pull and push */
     @Preference public static int remote_timeout;
 
+    /** Refresh automatically when files or the repository change? */
+    @Preference public static boolean auto_refresh;
+
     static
     {
         AnnotatedPreferences.initialize(GitApp.class, "/git_preferences.properties");

@@ -534,6 +534,128 @@ public class GitRepositoryTest
         assertTrue(second_diff.contains("+2"));
     }
 
+    // --- Commit files, file history, blame ----------------------------------------
+
+    @Test
+    public void testCommitFiles() throws Exception
+    {
+        write("keep.txt", "keep\n");
+        write("old_name.txt", "same content\nfor rename detection\nmore lines\n");
+        write("gone.txt", "gone\n");
+        final RevCommit first = commitAll("first");
+
+        write("keep.txt", "changed\n");
+        Files.move(dir.toPath().resolve("old_name.txt"), dir.toPath().resolve("new_name.txt"));
+        Files.delete(dir.toPath().resolve("gone.txt"));
+        write("added.txt", "added\n");
+        final RevCommit second = commitAll("second");
+
+        // First commit: All added
+        assertEquals(List.of("Added:gone.txt", "Added:keep.txt", "Added:old_name.txt"),
+                     repo.getCommitFiles(first.name()).stream().map(f -> f.type() + ":" + f.path()).toList());
+
+        assertEquals(List.of("Added:added.txt", "Deleted:gone.txt", "Modified:keep.txt", "Renamed:new_name.txt<-old_name.txt"),
+                     repo.getCommitFiles(second.name()).stream()
+                         .map(f -> f.type() + ":" + f.path() + (f.old_path() == null ? "" : "<-" + f.old_path()))
+                         .toList());
+
+        // Diff of a single file
+        final String keep = repo.getCommitFileDiff(second.name(), "keep.txt");
+        assertTrue(keep.contains("-keep"));
+        assertTrue(keep.contains("+changed"));
+        assertFalse(keep.contains("added.txt"));
+        // Rename can be found by old or new path
+        assertTrue(repo.getCommitFileDiff(second.name(), "old_name.txt").contains("rename from old_name.txt"));
+        assertTrue(repo.getCommitFileDiff(second.name(), "new_name.txt").contains("rename to new_name.txt"));
+    }
+
+    @Test
+    public void testFileHistoryFollowsRename() throws Exception
+    {
+        write("other.txt", "other\n");
+        commitAll("unrelated");
+        write("old.db", "record 1\nrecord 2\nrecord 3\nrecord 4\n");
+        commitAll("create old.db");
+        write("old.db", "record 1\nrecord 2\nrecord 3\nrecord 4 changed\n");
+        commitAll("change old.db");
+        Files.move(dir.toPath().resolve("old.db"), dir.toPath().resolve("new.db"));
+        commitAll("rename to new.db");
+        write("new.db", "record 1 changed\nrecord 2\nrecord 3\nrecord 4 changed\n");
+        commitAll("change new.db");
+        write("other.txt", "other changed\n");
+        commitAll("unrelated 2");
+
+        final List<String> history = repo.getFileHistory("new.db", 100).stream()
+                                         .map(v -> v.commit().message() + "@" + v.path())
+                                         .toList();
+        assertEquals(List.of("change new.db@new.db",
+                             "rename to new.db@new.db",
+                             "change old.db@old.db",
+                             "create old.db@old.db"),
+                     history);
+
+        // Diff of each version uses the path at that time
+        final var versions = repo.getFileHistory("new.db", 100);
+        assertTrue(repo.getCommitFileDiff(versions.get(2).commit().id(), versions.get(2).path()).contains("+record 4 changed"));
+        assertEquals(2, repo.getFileHistory("new.db", 2).size());
+    }
+
+    @Test
+    public void testBlame() throws Exception
+    {
+        write("a.db", "line 1\nline 2\nline 3\n");
+        final RevCommit first = commitAll("first");
+        write("a.db", "line 1\nline 2 changed\nline 3\n");
+        final RevCommit second = commitAll("second");
+        // Uncommitted change in the work tree
+        write("a.db", "line 1\nline 2 changed\nline 3 local\n");
+
+        final List<GitRepository.BlameLine> lines = repo.blame("a.db");
+        assertEquals(3, lines.size());
+        assertEquals(first.name(), lines.get(0).commit());
+        assertEquals("line 1", lines.get(0).text());
+        assertEquals(second.name(), lines.get(1).commit());
+        assertEquals("Tester", lines.get(1).author());
+        assertEquals("line 3 local", lines.get(2).text());
+        assertNull(lines.get(2).commit());
+        assertEquals("", lines.get(2).author());
+
+        write("untracked.db", "x\n");
+        assertThrows(Exception.class, () -> repo.blame("untracked.db"));
+    }
+
+    @Test
+    public void testInitAndClone() throws Exception
+    {
+        final File new_dir = tmp.resolve("new_repo").toFile();
+        GitRepository.init(new_dir);
+        assertTrue(new File(new_dir, ".git").isDirectory());
+        assertThrows(Exception.class, () -> GitRepository.init(new_dir));
+
+        write("a.txt", "1\n");
+        commitAll("base");
+        final File clone_dir = tmp.resolve("cloned").toFile();
+        final List<String> tasks = new java.util.ArrayList<>();
+        GitRepository.cloneRepository(dir.toURI().toString(), clone_dir, null,
+                                      new org.eclipse.jgit.lib.EmptyProgressMonitor()
+        {
+            @Override
+            public void beginTask(final String title, final int total)
+            {
+                tasks.add(title);
+            }
+        });
+        assertEquals("1\n", Files.readString(clone_dir.toPath().resolve("a.txt")));
+        assertFalse(tasks.isEmpty());
+        try (GitRepository clone = new GitRepository(clone_dir))
+        {
+            assertEquals("origin/master", clone.getBranches().get(0).upstream());
+        }
+        // Clone into non-empty directory fails
+        assertThrows(Exception.class, () -> GitRepository.cloneRepository(dir.toURI().toString(), clone_dir, null,
+                                                                          org.eclipse.jgit.lib.NullProgressMonitor.INSTANCE));
+    }
+
     // --- Remotes -------------------------------------------------------------------
 
     /** Create bare 'remote' with one commit, and clone it as the repository under test */

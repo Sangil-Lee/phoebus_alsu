@@ -8,6 +8,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -28,7 +29,11 @@ import org.eclipse.jgit.api.RevertCommand;
 import org.eclipse.jgit.api.RmCommand;
 import org.eclipse.jgit.api.Status;
 import org.eclipse.jgit.api.TransportCommand;
+import org.eclipse.jgit.blame.BlameResult;
+import org.eclipse.jgit.diff.DiffConfig;
+import org.eclipse.jgit.diff.DiffEntry;
 import org.eclipse.jgit.diff.DiffFormatter;
+import org.eclipse.jgit.diff.RawText;
 import org.eclipse.jgit.dircache.DirCache;
 import org.eclipse.jgit.dircache.DirCacheEntry;
 import org.eclipse.jgit.dircache.DirCacheIterator;
@@ -37,6 +42,7 @@ import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.lib.ObjectReader;
 import org.eclipse.jgit.lib.PersonIdent;
+import org.eclipse.jgit.lib.ProgressMonitor;
 import org.eclipse.jgit.lib.Ref;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.lib.RepositoryState;
@@ -44,6 +50,8 @@ import org.eclipse.jgit.revplot.PlotCommit;
 import org.eclipse.jgit.revplot.PlotCommitList;
 import org.eclipse.jgit.revplot.PlotLane;
 import org.eclipse.jgit.revplot.PlotWalk;
+import org.eclipse.jgit.revwalk.FollowFilter;
+import org.eclipse.jgit.revwalk.RenameCallback;
 import org.eclipse.jgit.revwalk.RevCommit;
 import org.eclipse.jgit.revwalk.RevObject;
 import org.eclipse.jgit.revwalk.RevSort;
@@ -60,8 +68,11 @@ import org.eclipse.jgit.treewalk.AbstractTreeIterator;
 import org.eclipse.jgit.treewalk.CanonicalTreeParser;
 import org.eclipse.jgit.treewalk.EmptyTreeIterator;
 import org.eclipse.jgit.treewalk.FileTreeIterator;
+import org.eclipse.jgit.treewalk.TreeWalk;
+import org.eclipse.jgit.treewalk.WorkingTreeIterator;
 import org.eclipse.jgit.treewalk.filter.PathFilter;
 import org.eclipse.jgit.treewalk.filter.PathFilterGroup;
+import org.eclipse.jgit.util.io.DisabledOutputStream;
 
 /** Thin wrapper around JGit for the operations used by the UI
  *
@@ -77,6 +88,7 @@ public class GitRepository implements AutoCloseable
         ADDED("Added"),
         MODIFIED("Modified"),
         DELETED("Deleted"),
+        RENAMED("Renamed"),
         UNTRACKED("Untracked"),
         CONFLICT("Conflict");
 
@@ -99,6 +111,28 @@ public class GitRepository implements AutoCloseable
      *  @param path Path relative to the work tree
      */
     public record StatusEntry(ChangeType type, String path) {}
+
+    /** File changed by a commit
+     *  @param type Kind of change
+     *  @param path Path after the change, or the old path for a deleted file
+     *  @param old_path Path before a rename, otherwise <code>null</code>
+     */
+    public record CommitFile(ChangeType type, String path, String old_path) {}
+
+    /** Commit in the history of a file
+     *  @param commit Commit
+     *  @param path Path of the file in this commit, may differ from the current path after a rename
+     */
+    public record FileVersion(CommitInfo commit, String path) {}
+
+    /** One line of 'blame'
+     *  @param number Line number, starting at 1
+     *  @param commit Id of the commit that last changed the line, <code>null</code> if not committed
+     *  @param author Author of that commit
+     *  @param date Date of that commit
+     *  @param text Line text
+     */
+    public record BlameLine(int number, String commit, String author, Instant date, String text) {}
 
     /** Changed files
      *  @param staged Changes in the index, compared to HEAD
@@ -163,6 +197,36 @@ public class GitRepository implements AutoCloseable
 
     private final Git git;
 
+    /** Clone a remote repository
+     *  @param url Remote URL
+     *  @param directory New directory for the clone
+     *  @param credentials Credentials provider
+     *  @param monitor Progress monitor
+     */
+    public static void cloneRepository(final String url, final File directory,
+                                       final CredentialsProvider credentials,
+                                       final ProgressMonitor monitor) throws Exception
+    {
+        if (directory.exists()  &&  directory.list().length > 0)
+            throw new Exception("Directory is not empty: " + directory);
+        final var command = Git.cloneRepository()
+                               .setURI(url)
+                               .setDirectory(directory)
+                               .setProgressMonitor(monitor);
+        configure(command, credentials);
+        command.call().close();
+    }
+
+    /** Create a new, empty repository
+     *  @param directory Directory for the new work tree
+     */
+    public static void init(final File directory) throws Exception
+    {
+        if (new File(directory, Constants.DOT_GIT).exists())
+            throw new Exception("Already a git repository: " + directory);
+        Git.init().setDirectory(directory).call().close();
+    }
+
     /** @param directory Directory inside a work tree; parent directories are searched for '.git'
      *  @throws Exception if no repository is found
      */
@@ -172,6 +236,43 @@ public class GitRepository implements AutoCloseable
         if (builder.getGitDir() == null)
             throw new Exception("No git repository found for " + directory);
         git = new Git(builder.build());
+    }
+
+    /** Directories to watch for changes
+     *
+     *  <p>Directories of the work tree that are not ignored,
+     *  plus the git directory (HEAD, index) and its 'refs' (branches, tags).
+     *
+     *  @param max Maximum number of work tree directories
+     *  @return Directories
+     */
+    public synchronized List<File> getWatchDirectories(final int max) throws Exception
+    {
+        final Repository repository = git.getRepository();
+        final File top = repository.getWorkTree();
+        final List<File> dirs = new ArrayList<>();
+        dirs.add(top);
+        try (TreeWalk walk = new TreeWalk(repository))
+        {
+            // Iterator skips '.git' and can tell which entries are ignored
+            walk.addTree(new FileTreeIterator(repository));
+            walk.setRecursive(false);
+            while (walk.next()  &&  dirs.size() < max)
+                if (walk.isSubtree()  &&  ! walk.getTree(0, WorkingTreeIterator.class).isEntryIgnored())
+                {
+                    dirs.add(new File(top, walk.getPathString()));
+                    walk.enterSubtree();
+                }
+        }
+        final File git_dir = repository.getDirectory();
+        dirs.add(git_dir);
+        final File refs = new File(git_dir, "refs");
+        if (refs.isDirectory())
+            try (var paths = Files.walk(refs.toPath()))
+            {
+                paths.filter(Files::isDirectory).forEach(path -> dirs.add(path.toFile()));
+            }
+        return dirs;
     }
 
     /** @return Top directory of the work tree */
@@ -455,6 +556,142 @@ public class GitRepository implements AutoCloseable
             formatter.flush();
         }
         return out.toString(StandardCharsets.UTF_8);
+    }
+
+    /** Compare a commit with its first parent, detecting renames
+     *  @param walk Walk for parsing the commit
+     *  @param formatter Formatter to use for the comparison
+     *  @param id Commit id
+     */
+    private List<DiffEntry> scanCommit(final RevWalk walk, final DiffFormatter formatter, final String id) throws Exception
+    {
+        final RevCommit commit = walk.parseCommit(ObjectId.fromString(id));
+        final RevTree parent = commit.getParentCount() > 0
+                             ? walk.parseCommit(commit.getParent(0)).getTree()
+                             : null;
+        formatter.setRepository(git.getRepository());
+        formatter.setDetectRenames(true);
+        return formatter.scan(parent, commit.getTree());
+    }
+
+    /** @param id Commit id
+     *  @return Files changed by the commit, compared to its first parent
+     */
+    public synchronized List<CommitFile> getCommitFiles(final String id) throws Exception
+    {
+        final List<CommitFile> result = new ArrayList<>();
+        try (RevWalk walk = new RevWalk(git.getRepository());
+             DiffFormatter formatter = new DiffFormatter(DisabledOutputStream.INSTANCE))
+        {
+            for (DiffEntry entry : scanCommit(walk, formatter, id))
+                result.add(switch (entry.getChangeType())
+                {
+                    case ADD    -> new CommitFile(ChangeType.ADDED, entry.getNewPath(), null);
+                    case COPY   -> new CommitFile(ChangeType.ADDED, entry.getNewPath(), null);
+                    case DELETE -> new CommitFile(ChangeType.DELETED, entry.getOldPath(), null);
+                    case RENAME -> new CommitFile(ChangeType.RENAMED, entry.getNewPath(), entry.getOldPath());
+                    default     -> new CommitFile(ChangeType.MODIFIED, entry.getNewPath(), null);
+                });
+        }
+        result.sort(Comparator.comparing(CommitFile::path));
+        return result;
+    }
+
+    /** @param id Commit id
+     *  @param path File path in that commit, new or old path of a rename
+     *  @return Unified diff of that file in the commit, compared to its first parent
+     */
+    public synchronized String getCommitFileDiff(final String id, final String path) throws Exception
+    {
+        final ByteArrayOutputStream out = new ByteArrayOutputStream();
+        try (RevWalk walk = new RevWalk(git.getRepository());
+             DiffFormatter formatter = new DiffFormatter(out))
+        {
+            for (DiffEntry entry : scanCommit(walk, formatter, id))
+                if (path.equals(entry.getNewPath())  ||  path.equals(entry.getOldPath()))
+                {
+                    formatter.format(entry);
+                    break;
+                }
+            formatter.flush();
+        }
+        return out.toString(StandardCharsets.UTF_8);
+    }
+
+    /** History of a file, following renames like 'git log --follow'
+     *  @param path Current path of the file
+     *  @param count Maximum number of commits
+     *  @return Commits that changed the file, newest first, with the file's path in each commit
+     */
+    public synchronized List<FileVersion> getFileHistory(final String path, final int count) throws Exception
+    {
+        final Repository repository = git.getRepository();
+        final List<FileVersion> result = new ArrayList<>();
+        final ObjectId head = repository.resolve(Constants.HEAD);
+        if (head == null)
+            return result;
+        try (RevWalk walk = new RevWalk(repository))
+        {
+            // Renames found while walking, new path -> old path.
+            // The walk evaluates commits ahead of returning them, so the callback
+            // cannot tell which returned commit had the rename. Instead, each commit
+            // is checked for the current path, and older commits that lack it use the old path.
+            final Map<String, String> renames = new HashMap<>();
+            final FollowFilter filter = FollowFilter.create(path, repository.getConfig().get(DiffConfig.KEY));
+            filter.setRenameCallback(new RenameCallback()
+            {
+                @Override
+                public void renamed(final DiffEntry entry)
+                {
+                    renames.put(entry.getNewPath(), entry.getOldPath());
+                }
+            });
+            walk.setTreeFilter(filter);
+            walk.markStart(walk.parseCommit(head));
+            String current = path;
+            for (RevCommit commit : walk)
+            {
+                if (result.size() >= count)
+                    break;
+                while (TreeWalk.forPath(repository, current, commit.getTree()) == null  &&
+                       renames.containsKey(current))
+                    current = renames.get(current);
+                result.add(new FileVersion(new CommitInfo(commit.name(),
+                                                          commit.getShortMessage(),
+                                                          commit.getAuthorIdent().getName(),
+                                                          Instant.ofEpochSecond(commit.getCommitTime()),
+                                                          null),
+                                           current));
+            }
+        }
+        return result;
+    }
+
+    /** Show who last changed each line of a file, following renames
+     *  @param path File path relative to the work tree
+     *  @return Lines of the file in the work tree with their last change
+     *  @throws Exception if the file is not tracked
+     */
+    public synchronized List<BlameLine> blame(final String path) throws Exception
+    {
+        final BlameResult blame = git.blame().setFilePath(path).setFollowFileRenames(true).call();
+        if (blame == null)
+            throw new Exception("No history for " + path);
+        blame.computeAll();
+        final RawText text = blame.getResultContents();
+        final List<BlameLine> result = new ArrayList<>(text.size());
+        for (int i=0; i<text.size(); ++i)
+        {
+            final RevCommit commit = blame.getSourceCommit(i);
+            final PersonIdent author = blame.getSourceAuthor(i);
+            // For uncommitted lines, JGit reports a placeholder author "Not Committed Yet"
+            result.add(new BlameLine(i + 1,
+                                     commit == null ? null : commit.name(),
+                                     commit == null  ||  author == null ? "" : author.getName(),
+                                     commit == null ? null : Instant.ofEpochSecond(commit.getCommitTime()),
+                                     text.getString(i)));
+        }
+        return result;
     }
 
     /** @param paths Changed files, relative to the work tree
