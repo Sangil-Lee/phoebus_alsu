@@ -17,6 +17,7 @@
     <module>email</module>
     <module>errlog</module>
     <module>filebrowser</module>
+    <module>git</module>
     <module>logbook</module>
     <module>rtplot</module>
     <module>databrowser</module>
