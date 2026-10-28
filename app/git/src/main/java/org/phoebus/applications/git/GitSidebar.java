@@ -40,6 +40,10 @@ class GitSidebar extends TreeView<Object>
         void dropStash(StashInfo stash);
         /** @param branch Local or remote branch to merge into the current branch */
         void merge(String branch);
+        /** @param branch Local or remote branch onto which the current branch is rebased, after asking user */
+        void rebaseOnto(String branch);
+        /** Prompt for new name of local branch */
+        void renameBranch(BranchInfo branch);
         void pushTag(TagInfo tag);
         void deleteTag(TagInfo tag);
         /** Delete tag on the remote, after asking user */
@@ -307,10 +311,15 @@ class GitSidebar extends TreeView<Object>
         final MenuItem merge = new MenuItem(Messages.MergeIntoCurrent);
         merge.setDisable(branch.current());
         merge.setOnAction(event -> actions.merge(branch.name()));
+        final MenuItem rebase = new MenuItem(Messages.RebaseOnto);
+        rebase.setDisable(branch.current());
+        rebase.setOnAction(event -> actions.rebaseOnto(branch.name()));
+        final MenuItem rename = new MenuItem(Messages.RenameBranch);
+        rename.setOnAction(event -> actions.renameBranch(branch));
         final MenuItem delete = new MenuItem(Messages.DeleteBranch);
         delete.setDisable(branch.current());
         delete.setOnAction(event -> actions.deleteBranch(branch));
-        return new ContextMenu(checkout, create, merge, delete);
+        return new ContextMenu(checkout, create, merge, rebase, rename, delete);
     }
 
     private ContextMenu createMenu(final RemoteBranch branch)
@@ -321,7 +330,9 @@ class GitSidebar extends TreeView<Object>
         create.setOnAction(event -> actions.createBranch(branch.fullName()));
         final MenuItem merge = new MenuItem(Messages.MergeIntoCurrent);
         merge.setOnAction(event -> actions.merge(branch.fullName()));
-        return new ContextMenu(checkout, create, merge);
+        final MenuItem rebase = new MenuItem(Messages.RebaseOnto);
+        rebase.setOnAction(event -> actions.rebaseOnto(branch.fullName()));
+        return new ContextMenu(checkout, create, merge, rebase);
     }
 
     private ContextMenu createMenu(final StashInfo stash)

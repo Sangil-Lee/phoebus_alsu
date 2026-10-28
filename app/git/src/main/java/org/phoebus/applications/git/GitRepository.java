@@ -1,9 +1,12 @@
 package org.phoebus.applications.git;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.OutputStream;
 import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -11,11 +14,13 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
 import org.eclipse.jgit.api.AddCommand;
+import org.eclipse.jgit.api.CheckoutCommand.Stage;
 import org.eclipse.jgit.api.CherryPickResult;
 import org.eclipse.jgit.api.CreateBranchCommand.SetupUpstreamMode;
 import org.eclipse.jgit.api.Git;
@@ -23,6 +28,8 @@ import org.eclipse.jgit.api.ListBranchCommand.ListMode;
 import org.eclipse.jgit.api.MergeCommand.FastForwardMode;
 import org.eclipse.jgit.api.MergeResult;
 import org.eclipse.jgit.api.PullResult;
+import org.eclipse.jgit.api.RebaseCommand;
+import org.eclipse.jgit.api.RebaseResult;
 import org.eclipse.jgit.api.ResetCommand;
 import org.eclipse.jgit.api.ResetCommand.ResetType;
 import org.eclipse.jgit.api.RevertCommand;
@@ -34,18 +41,26 @@ import org.eclipse.jgit.diff.DiffConfig;
 import org.eclipse.jgit.diff.DiffEntry;
 import org.eclipse.jgit.diff.DiffFormatter;
 import org.eclipse.jgit.diff.RawText;
+import org.eclipse.jgit.diff.RawTextComparator;
 import org.eclipse.jgit.dircache.DirCache;
+import org.eclipse.jgit.dircache.DirCacheEditor;
 import org.eclipse.jgit.dircache.DirCacheEntry;
 import org.eclipse.jgit.dircache.DirCacheIterator;
 import org.eclipse.jgit.lib.BranchTrackingStatus;
 import org.eclipse.jgit.lib.Constants;
+import org.eclipse.jgit.lib.FileMode;
 import org.eclipse.jgit.lib.ObjectId;
+import org.eclipse.jgit.lib.ObjectInserter;
 import org.eclipse.jgit.lib.ObjectReader;
 import org.eclipse.jgit.lib.PersonIdent;
 import org.eclipse.jgit.lib.ProgressMonitor;
 import org.eclipse.jgit.lib.Ref;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.lib.RepositoryState;
+import org.eclipse.jgit.lib.StoredConfig;
+import org.eclipse.jgit.patch.FileHeader;
+import org.eclipse.jgit.patch.HunkHeader;
+import org.eclipse.jgit.patch.Patch;
 import org.eclipse.jgit.revplot.PlotCommit;
 import org.eclipse.jgit.revplot.PlotCommitList;
 import org.eclipse.jgit.revplot.PlotLane;
@@ -57,9 +72,11 @@ import org.eclipse.jgit.revwalk.RevObject;
 import org.eclipse.jgit.revwalk.RevSort;
 import org.eclipse.jgit.revwalk.RevTree;
 import org.eclipse.jgit.revwalk.RevWalk;
+import org.eclipse.jgit.revwalk.filter.RevFilter;
 import org.eclipse.jgit.storage.file.FileRepositoryBuilder;
 import org.eclipse.jgit.transport.CredentialsProvider;
 import org.eclipse.jgit.transport.PushResult;
+import org.eclipse.jgit.transport.RefLeaseSpec;
 import org.eclipse.jgit.transport.RefSpec;
 import org.eclipse.jgit.transport.RemoteRefUpdate;
 import org.eclipse.jgit.transport.SshTransport;
@@ -139,9 +156,22 @@ public class GitRepository implements AutoCloseable
      *  @param unstaged Changes in the work tree, compared to the index, including conflicts and untracked files
      *  @param merging Is a merge, cherry-pick or revert in progress, so that a commit is possible without staged changes?
      *  @param merge_message Prepared commit message of the merge, cherry-pick or revert, or <code>null</code>
+     *  @param rebasing Is a rebase in progress, to be continued, skipped or aborted?
      */
     public record FileStatus(List<StatusEntry> staged, List<StatusEntry> unstaged,
-                             boolean merging, String merge_message) {}
+                             boolean merging, String merge_message, boolean rebasing) {}
+
+    /** Push options
+     *  @param remote Remote, <code>null</code> for the branch's upstream remote or the default remote
+     *  @param branch Local branch, <code>null</code> for the current branch
+     *  @param tags Also push all tags?
+     *  @param force Overwrite the remote branch, but only if it's still where we last fetched it
+     */
+    public record PushOptions(String remote, String branch, boolean tags, boolean force)
+    {
+        /** Push current branch to its upstream */
+        public static final PushOptions DEFAULT = new PushOptions(null, null, false, false);
+    }
 
     /** One commit of the history
      *  @param id Full commit id
@@ -196,6 +226,9 @@ public class GitRepository implements AutoCloseable
                         List<TagInfo> tags, List<StashInfo> stashes) {}
 
     private final Git git;
+
+    /** Ignore white space changes when showing diffs? */
+    private volatile boolean ignore_whitespace = false;
 
     /** Clone a remote repository
      *  @param url Remote URL
@@ -293,7 +326,17 @@ public class GitRepository implements AutoCloseable
      */
     public synchronized State getState(final int log_count, final boolean all_branches) throws Exception
     {
-        return new State(getBranch(), getStatus(), getLog(log_count, all_branches),
+        return getState(log_count, all_branches, null);
+    }
+
+    /** @param log_count Maximum number of commits to read
+     *  @param all_branches Show history of all branches, or only the current one?
+     *  @param search Text to search in commit message, author, id; <code>null</code> or empty for all commits
+     *  @return Current state of the repository
+     */
+    public synchronized State getState(final int log_count, final boolean all_branches, final String search) throws Exception
+    {
+        return new State(getBranch(), getStatus(), getLog(log_count, all_branches, search),
                          getBranches(), getRemoteBranches(), getRemoteUrls(), getTags(), getStashes());
     }
 
@@ -338,6 +381,9 @@ public class GitRepository implements AutoCloseable
         final List<BranchInfo> result = new ArrayList<>();
         for (Ref ref : git.branchList().call())
         {
+            // With detached HEAD, for example during a rebase, the list includes "HEAD"
+            if (! ref.getName().startsWith(Constants.R_HEADS))
+                continue;
             final String name = Repository.shortenRefName(ref.getName());
             final BranchTrackingStatus tracking = BranchTrackingStatus.of(repository, name);
             result.add(new BranchInfo(name, ref.getObjectId().name(), ref.getName().equals(current),
@@ -356,8 +402,8 @@ public class GitRepository implements AutoCloseable
             result.put(remote, new ArrayList<>());
         for (Ref ref : git.branchList().setListMode(ListMode.REMOTE).call())
         {
-            // Skip "origin/HEAD"
-            if (ref.isSymbolic())
+            // Skip "origin/HEAD", and a detached "HEAD" that the list includes for example during a rebase
+            if (ref.isSymbolic()  ||  ! ref.getName().startsWith(Constants.R_REMOTES))
                 continue;
             final String name = ref.getName().substring(Constants.R_REMOTES.length());
             for (String remote : result.keySet())
@@ -413,8 +459,10 @@ public class GitRepository implements AutoCloseable
         staged.sort(Comparator.comparing(StatusEntry::path));
         unstaged.sort(Comparator.comparing(StatusEntry::path));
         final Repository repository = git.getRepository();
-        final boolean merging = isMerging(repository.getRepositoryState());
-        return new FileStatus(staged, unstaged, merging, merging ? getMergeMessage(repository) : null);
+        final RepositoryState state = repository.getRepositoryState();
+        final boolean merging = isMerging(state);
+        return new FileStatus(staged, unstaged, merging, merging ? getMergeMessage(repository) : null,
+                              state.isRebasing());
     }
 
     /** @return Prepared merge message without '# Conflicts' comments, or <code>null</code> */
@@ -455,6 +503,54 @@ public class GitRepository implements AutoCloseable
      */
     public synchronized List<CommitInfo> getLog(final int count, final boolean all_branches) throws Exception
     {
+        return getLog(count, all_branches, null);
+    }
+
+    /** Commit filter for a text in message, author, committer or id */
+    private static class SearchFilter extends RevFilter
+    {
+        private final String text;
+
+        SearchFilter(final String text)
+        {
+            this.text = text.toLowerCase(Locale.ROOT);
+        }
+
+        private boolean matches(final PersonIdent person)
+        {
+            return person.getName().toLowerCase(Locale.ROOT).contains(text)  ||
+                   person.getEmailAddress().toLowerCase(Locale.ROOT).contains(text);
+        }
+
+        @Override
+        public boolean include(final RevWalk walker, final RevCommit commit)
+        {
+            return commit.name().startsWith(text)  ||
+                   commit.getFullMessage().toLowerCase(Locale.ROOT).contains(text)  ||
+                   matches(commit.getAuthorIdent())  ||
+                   matches(commit.getCommitterIdent());
+        }
+
+        @Override
+        public RevFilter clone()
+        {
+            return this;
+        }
+
+        @Override
+        public boolean requiresCommitBody()
+        {
+            return true;
+        }
+    }
+
+    /** @param count Maximum number of commits
+     *  @param all_branches Include all local and remote branches and tags, or only HEAD?
+     *  @param search Text to search in commit message, author, id; <code>null</code> or empty for all commits
+     *  @return Most recent (matching) commits with commit graph information, newest first
+     */
+    public synchronized List<CommitInfo> getLog(final int count, final boolean all_branches, final String search) throws Exception
+    {
         final Repository repository = git.getRepository();
         final List<CommitInfo> result = new ArrayList<>();
         try (PlotWalk walk = new PlotWalk(repository))
@@ -462,6 +558,8 @@ public class GitRepository implements AutoCloseable
             // Children before parents, otherwise newest first
             walk.sort(RevSort.TOPO, true);
             walk.sort(RevSort.COMMIT_TIME_DESC, true);
+            if (search != null  &&  ! search.isBlank())
+                walk.setRevFilter(new SearchFilter(search.trim()));
 
             boolean have_start = markStart(walk, repository.resolve(Constants.HEAD));
             if (all_branches)
@@ -548,7 +646,7 @@ public class GitRepository implements AutoCloseable
     private String formatDiff(final String path, final AbstractTreeIterator old_tree, final AbstractTreeIterator new_tree) throws Exception
     {
         final ByteArrayOutputStream out = new ByteArrayOutputStream();
-        try (DiffFormatter formatter = new DiffFormatter(out))
+        try (DiffFormatter formatter = createFormatter(out))
         {
             formatter.setRepository(git.getRepository());
             formatter.setPathFilter(PathFilter.create(path));
@@ -581,7 +679,7 @@ public class GitRepository implements AutoCloseable
     {
         final List<CommitFile> result = new ArrayList<>();
         try (RevWalk walk = new RevWalk(git.getRepository());
-             DiffFormatter formatter = new DiffFormatter(DisabledOutputStream.INSTANCE))
+             DiffFormatter formatter = createFormatter(DisabledOutputStream.INSTANCE))
         {
             for (DiffEntry entry : scanCommit(walk, formatter, id))
                 result.add(switch (entry.getChangeType())
@@ -605,7 +703,7 @@ public class GitRepository implements AutoCloseable
     {
         final ByteArrayOutputStream out = new ByteArrayOutputStream();
         try (RevWalk walk = new RevWalk(git.getRepository());
-             DiffFormatter formatter = new DiffFormatter(out))
+             DiffFormatter formatter = createFormatter(out))
         {
             for (DiffEntry entry : scanCommit(walk, formatter, id))
                 if (path.equals(entry.getNewPath())  ||  path.equals(entry.getOldPath()))
@@ -694,6 +792,24 @@ public class GitRepository implements AutoCloseable
         return result;
     }
 
+    /** @param ignore Ignore white space changes when showing diffs?
+     *  Hunk operations always use the complete diff
+     */
+    public void setIgnoreWhitespace(final boolean ignore)
+    {
+        ignore_whitespace = ignore;
+    }
+
+    /** @param out Where the diff is written
+     *  @return Formatter that honors the white space option
+     */
+    private DiffFormatter createFormatter(final OutputStream out)
+    {
+        final DiffFormatter formatter = new DiffFormatter(out);
+        formatter.setDiffComparator(ignore_whitespace ? RawTextComparator.WS_IGNORE_ALL : RawTextComparator.DEFAULT);
+        return formatter;
+    }
+
     /** @param paths Changed files, relative to the work tree
      *  @return Unified diff of these files from HEAD to the work tree, i.e. all uncommitted changes
      */
@@ -704,7 +820,7 @@ public class GitRepository implements AutoCloseable
         final Repository repository = git.getRepository();
         final ByteArrayOutputStream out = new ByteArrayOutputStream();
         try (ObjectReader reader = repository.newObjectReader();
-             DiffFormatter formatter = new DiffFormatter(out))
+             DiffFormatter formatter = createFormatter(out))
         {
             formatter.setRepository(repository);
             // Limit to the changed files, the work tree may contain many ignored files
@@ -723,7 +839,7 @@ public class GitRepository implements AutoCloseable
         final Repository repository = git.getRepository();
         final ByteArrayOutputStream out = new ByteArrayOutputStream();
         try (RevWalk walk = new RevWalk(repository);
-             DiffFormatter formatter = new DiffFormatter(out))
+             DiffFormatter formatter = createFormatter(out))
         {
             final RevCommit commit = walk.parseCommit(ObjectId.fromString(id));
             final PersonIdent author = commit.getAuthorIdent();
@@ -819,6 +935,299 @@ public class GitRepository implements AutoCloseable
                 break;
             Files.delete(parent.toPath());
         }
+    }
+
+    /** Resolve a conflict by using one side's version of the file, then stage it
+     *  @param path Conflicting file
+     *  @param ours Use our version (current branch), or theirs (branch being merged)?
+     */
+    public synchronized void resolveConflict(final String path, final boolean ours) throws Exception
+    {
+        final DirCache index = git.getRepository().readDirCache();
+        final int stage = ours ? DirCacheEntry.STAGE_2 : DirCacheEntry.STAGE_3;
+        boolean have_stage = false;
+        for (int i = index.findEntry(path);
+             i >= 0  &&  i < index.getEntryCount()  &&  index.getEntry(i).getPathString().equals(path);
+             ++i)
+            if (index.getEntry(i).getStage() == stage)
+                have_stage = true;
+        if (have_stage)
+        {
+            git.checkout().setStage(ours ? Stage.OURS : Stage.THEIRS).addPath(path).call();
+            git.add().addFilepattern(path).call();
+        }
+        else
+        {
+            // That side deleted the file
+            Files.deleteIfExists(new File(getWorkTree(), path).toPath());
+            git.rm().addFilepattern(path).call();
+        }
+    }
+
+    /** @param path File path
+     *  @param old_tree Old side
+     *  @param new_tree New side
+     *  @return Raw unified diff of the file, never ignoring white space
+     */
+    private byte[] getRawDiff(final String path, final AbstractTreeIterator old_tree, final AbstractTreeIterator new_tree) throws Exception
+    {
+        final ByteArrayOutputStream out = new ByteArrayOutputStream();
+        try (DiffFormatter formatter = new DiffFormatter(out))
+        {
+            formatter.setRepository(git.getRepository());
+            formatter.setPathFilter(PathFilter.create(path));
+            formatter.format(old_tree, new_tree);
+            formatter.flush();
+        }
+        return out.toByteArray();
+    }
+
+    /** @param diff Raw unified diff of one file
+     *  @param index Index of the hunk
+     *  @return Hunk
+     *  @throws Exception if there is no such hunk
+     */
+    private static HunkHeader getHunk(final byte[] diff, final int index) throws Exception
+    {
+        final Patch patch = new Patch();
+        patch.parse(new ByteArrayInputStream(diff));
+        if (patch.getFiles().isEmpty())
+            throw new Exception("No changes, refresh and try again");
+        final FileHeader file = patch.getFiles().get(0);
+        if (index < 0  ||  index >= file.getHunks().size())
+            throw new Exception("Hunk " + (index + 1) + " not found, refresh and try again");
+        return file.getHunks().get(index);
+    }
+
+    /** @param content File content
+     *  @return Lines of the content, each including its '\n' unless it's the last line without newline
+     */
+    private static List<byte[]> splitLines(final byte[] content, final int start, final int end)
+    {
+        final List<byte[]> lines = new ArrayList<>();
+        int line_start = start;
+        for (int i=start; i<end; ++i)
+            if (content[i] == '\n')
+            {
+                lines.add(java.util.Arrays.copyOfRange(content, line_start, i + 1));
+                line_start = i + 1;
+            }
+        if (line_start < end)
+            lines.add(java.util.Arrays.copyOfRange(content, line_start, end));
+        return lines;
+    }
+
+    /** Apply one hunk to file content
+     *
+     *  <p>The lines around the change must exactly match,
+     *  otherwise the file changed since the diff was computed.
+     *
+     *  @param content Content of the file on the old side (or new side when reversed)
+     *  @param hunk Hunk of a unified diff
+     *  @param reverse Apply in reverse, i.e. undo the hunk?
+     *  @return Updated content
+     *  @throws Exception if the hunk does not match the content
+     */
+    static byte[] applyHunk(final byte[] content, final HunkHeader hunk, final boolean reverse) throws Exception
+    {
+        // Lines of the hunk without the '@@' header line
+        final List<byte[]> body = splitLines(hunk.getBuffer(), hunk.getStartOffset(), hunk.getEndOffset());
+        body.remove(0);
+        final List<byte[]> old_lines = new ArrayList<>(), new_lines = new ArrayList<>();
+        char last = ' ';
+        for (byte[] line : body)
+        {
+            if (line.length == 0)
+                continue;
+            final char type = (char) line[0];
+            final byte[] text = java.util.Arrays.copyOfRange(line, 1, line.length);
+            switch (type)
+            {
+            case ' ':
+                old_lines.add(text);
+                new_lines.add(text);
+                break;
+            case '-':
+                old_lines.add(text);
+                break;
+            case '+':
+                new_lines.add(text);
+                break;
+            case '\\':
+                // "\ No newline at end of file" applies to the preceding line
+                if (last == ' '  ||  last == '-')
+                    stripNewline(old_lines);
+                if (last == ' '  ||  last == '+')
+                    stripNewline(new_lines);
+                break;
+            default:
+                // End of hunk, for example the next 'diff --git'
+                break;
+            }
+            if (type == ' '  ||  type == '-'  ||  type == '+')
+                last = type;
+        }
+
+        final List<byte[]> from = reverse ? new_lines : old_lines;
+        final List<byte[]> to   = reverse ? old_lines : new_lines;
+        final int start = reverse ? hunk.getNewStartLine() : hunk.getOldImage().getStartLine();
+        final int count = reverse ? hunk.getNewLineCount() : hunk.getOldImage().getLineCount();
+        // For an empty range, the start is the line after which to insert
+        final int position = count == 0 ? start : start - 1;
+
+        final List<byte[]> lines = splitLines(content, 0, content.length);
+        if (position < 0  ||  position + from.size() > lines.size())
+            throw new Exception("The file changed, refresh and try again");
+        for (int i=0; i<from.size(); ++i)
+            if (! java.util.Arrays.equals(lines.get(position + i), from.get(i)))
+                throw new Exception("The file changed, refresh and try again");
+
+        final ByteArrayOutputStream out = new ByteArrayOutputStream(content.length);
+        for (int i=0; i<position; ++i)
+            out.write(lines.get(i));
+        for (byte[] line : to)
+            out.write(line);
+        for (int i=position + from.size(); i<lines.size(); ++i)
+            out.write(lines.get(i));
+        return out.toByteArray();
+    }
+
+    private static void stripNewline(final List<byte[]> lines)
+    {
+        if (lines.isEmpty())
+            return;
+        final byte[] line = lines.get(lines.size() - 1);
+        if (line.length > 0  &&  line[line.length - 1] == '\n')
+            lines.set(lines.size() - 1, java.util.Arrays.copyOf(line, line.length - 1));
+    }
+
+    /** @param path File path
+     *  @return Index entry of the file, <code>null</code> if not in index
+     *  @throws Exception if the file has a conflict
+     */
+    private DirCacheEntry getIndexEntry(final String path) throws Exception
+    {
+        final DirCache index = git.getRepository().readDirCache();
+        final int i = index.findEntry(path);
+        if (i < 0)
+            return null;
+        final DirCacheEntry entry = index.getEntry(i);
+        if (entry.getStage() != DirCacheEntry.STAGE_0)
+            throw new Exception("Resolve the conflict of " + path + " first");
+        return entry;
+    }
+
+    /** @param entry Index entry or <code>null</code>
+     *  @return Content of the index entry, empty if <code>null</code>
+     */
+    private byte[] getContent(final DirCacheEntry entry) throws Exception
+    {
+        if (entry == null)
+            return new byte[0];
+        return git.getRepository().open(entry.getObjectId(), Constants.OBJ_BLOB).getBytes();
+    }
+
+    /** Write new content for a file into the index
+     *  @param path File path
+     *  @param content New content
+     *  @param mode File mode
+     */
+    private void writeIndex(final String path, final byte[] content, final FileMode mode) throws Exception
+    {
+        final Repository repository = git.getRepository();
+        final ObjectId id;
+        try (ObjectInserter inserter = repository.newObjectInserter())
+        {
+            id = inserter.insert(Constants.OBJ_BLOB, content);
+            inserter.flush();
+        }
+        final DirCache index = repository.lockDirCache();
+        try
+        {
+            final DirCacheEditor editor = index.editor();
+            editor.add(new DirCacheEditor.PathEdit(path)
+            {
+                @Override
+                public void apply(final DirCacheEntry entry)
+                {
+                    entry.setFileMode(mode);
+                    entry.setObjectId(id);
+                    entry.setLength(content.length);
+                    // Index content differs from the work tree, force a content check
+                    entry.setLastModified(Instant.EPOCH);
+                }
+            });
+            editor.commit();
+        }
+        finally
+        {
+            index.unlock();
+        }
+    }
+
+    /** Stage one hunk of the unstaged changes
+     *  @param path File path
+     *  @param hunk Index of the hunk in the unstaged diff of the file
+     */
+    public synchronized void stageHunk(final String path, final int hunk) throws Exception
+    {
+        final Repository repository = git.getRepository();
+        final DirCacheEntry entry = getIndexEntry(path);
+        final byte[] diff = getRawDiff(path, new DirCacheIterator(repository.readDirCache()), new FileTreeIterator(repository));
+        final byte[] content = applyHunk(getContent(entry), getHunk(diff, hunk), false);
+        writeIndex(path, content, entry == null ? FileMode.REGULAR_FILE : entry.getFileMode());
+    }
+
+    /** Unstage one hunk of the staged changes
+     *  @param path File path
+     *  @param hunk Index of the hunk in the staged diff of the file
+     */
+    public synchronized void unstageHunk(final String path, final int hunk) throws Exception
+    {
+        final Repository repository = git.getRepository();
+        final DirCacheEntry entry = getIndexEntry(path);
+        if (entry == null)
+            throw new Exception(path + " is not staged");
+        final byte[] diff;
+        try (ObjectReader reader = repository.newObjectReader())
+        {
+            diff = getRawDiff(path, getHeadTree(reader), new DirCacheIterator(repository.readDirCache()));
+        }
+        final byte[] content = applyHunk(getContent(entry), getHunk(diff, hunk), true);
+        writeIndex(path, content, entry.getFileMode());
+    }
+
+    /** Discard one hunk of the unstaged changes in the work tree
+     *  @param path File path
+     *  @param hunk Index of the hunk in the unstaged diff of the file
+     */
+    public synchronized void discardHunk(final String path, final int hunk) throws Exception
+    {
+        final Repository repository = git.getRepository();
+        final byte[] diff = getRawDiff(path, new DirCacheIterator(repository.readDirCache()), new FileTreeIterator(repository));
+        final Path file = new File(getWorkTree(), path).toPath();
+        final byte[] content = applyHunk(Files.readAllBytes(file), getHunk(diff, hunk), true);
+        Files.write(file, content);
+    }
+
+    /** @param old_name Current name of local branch
+     *  @param new_name New name
+     */
+    public synchronized void renameBranch(final String old_name, final String new_name) throws Exception
+    {
+        git.branchRename().setOldName(old_name).setNewName(new_name).call();
+    }
+
+    /** Add a pattern to the .gitignore at the top of the work tree
+     *  @param pattern Pattern, for example "build/" or "*.log"
+     */
+    public synchronized void addToIgnore(final String pattern) throws Exception
+    {
+        final Path ignore = new File(getWorkTree(), Constants.GITIGNORE_FILENAME).toPath();
+        String text = Files.exists(ignore) ? Files.readString(ignore) : "";
+        if (! text.isEmpty()  &&  ! text.endsWith("\n"))
+            text += "\n";
+        Files.writeString(ignore, text + pattern + "\n");
     }
 
     /** @return Full message of the HEAD commit, <code>null</code> if there is none */
@@ -1023,7 +1432,7 @@ public class GitRepository implements AutoCloseable
         final Repository repository = git.getRepository();
         final ByteArrayOutputStream out = new ByteArrayOutputStream();
         try (RevWalk walk = new RevWalk(repository);
-             DiffFormatter formatter = new DiffFormatter(out))
+             DiffFormatter formatter = createFormatter(out))
         {
             final RevCommit stash = walk.parseCommit(ObjectId.fromString(id));
             if (stash.getParentCount() > 2)
@@ -1099,11 +1508,78 @@ public class GitRepository implements AutoCloseable
      */
     public synchronized void pull(final CredentialsProvider credentials) throws Exception
     {
-        final var command = git.pull();
+        if (pull(credentials, false))
+            throw new Exception("Pull stopped with merge conflicts");
+    }
+
+    /** Pull from the configured upstream
+     *  @param credentials Credentials provider
+     *  @param rebase Rebase local commits onto the upstream instead of merging?
+     *  @return <code>true</code> if it stopped with conflicts that need to be resolved
+     */
+    public synchronized boolean pull(final CredentialsProvider credentials, final boolean rebase) throws Exception
+    {
+        final var command = git.pull().setRebase(rebase);
         configure(command, credentials);
         final PullResult result = command.call();
+        if (result.getMergeResult() != null  &&
+            result.getMergeResult().getMergeStatus() == MergeResult.MergeStatus.CONFLICTING)
+            return true;
+        if (result.getRebaseResult() != null)
+            return checkRebase(result.getRebaseResult());
         if (! result.isSuccessful())
-            throw new Exception("Pull did not complete, check for merge conflicts\n" + result);
+            throw new Exception("Pull did not complete\n" + result);
+        return false;
+    }
+
+    /** @param result Result of rebase operation
+     *  @return <code>true</code> if rebase stopped with conflicts
+     *  @throws Exception if rebase failed
+     */
+    private static boolean checkRebase(final RebaseResult result) throws Exception
+    {
+        return switch (result.getStatus())
+        {
+            case STOPPED -> true;
+            case OK, UP_TO_DATE, FAST_FORWARD, ABORTED -> false;
+            case UNCOMMITTED_CHANGES -> throw new Exception("Rebase needs a clean work tree, commit or stash changes first: "
+                                                            + result.getUncommittedChanges());
+            case CONFLICTS -> throw new Exception("Rebase cannot start, local changes conflict: " + result.getConflicts());
+            case NOTHING_TO_COMMIT -> throw new Exception("Nothing to commit for this step of the rebase. Use 'Skip'");
+            default -> throw new Exception("Rebase " + result.getStatus() +
+                                           (result.getFailingPaths() != null ? ": " + result.getFailingPaths() : ""));
+        };
+    }
+
+    /** Rebase the current branch onto another branch
+     *  @param upstream Branch, tag or commit to rebase onto
+     *  @return <code>true</code> if it stopped with conflicts that need to be resolved
+     */
+    public synchronized boolean rebase(final String upstream) throws Exception
+    {
+        return checkRebase(git.rebase().setUpstream(upstream).call());
+    }
+
+    /** Continue rebase after resolving and staging conflicts
+     *  @return <code>true</code> if it stopped again with conflicts
+     */
+    public synchronized boolean continueRebase() throws Exception
+    {
+        return checkRebase(git.rebase().setOperation(RebaseCommand.Operation.CONTINUE).call());
+    }
+
+    /** Skip the current commit of the rebase
+     *  @return <code>true</code> if it stopped again with conflicts
+     */
+    public synchronized boolean skipRebase() throws Exception
+    {
+        return checkRebase(git.rebase().setOperation(RebaseCommand.Operation.SKIP).call());
+    }
+
+    /** Abort rebase, restoring the original branch */
+    public synchronized void abortRebase() throws Exception
+    {
+        checkRebase(git.rebase().setOperation(RebaseCommand.Operation.ABORT).call());
     }
 
     /** Push the current branch to the configured remote
@@ -1111,9 +1587,56 @@ public class GitRepository implements AutoCloseable
      */
     public synchronized void push(final CredentialsProvider credentials) throws Exception
     {
-        final var command = git.push();
+        push(PushOptions.DEFAULT, credentials);
+    }
+
+    /** Push a branch
+     *
+     *  <p>Pushes to the branch's upstream if it has one on that remote,
+     *  otherwise to a branch of the same name, which then becomes the upstream.
+     *
+     *  @param options Push options
+     *  @param credentials Credentials provider
+     */
+    public synchronized void push(final PushOptions options, final CredentialsProvider credentials) throws Exception
+    {
+        final Repository repository = git.getRepository();
+        final String branch = options.branch() != null ? options.branch() : repository.getBranch();
+        if (repository.findRef(Constants.R_HEADS + branch) == null)
+            throw new Exception("No local branch '" + branch + "' to push");
+        final StoredConfig config = repository.getConfig();
+        final String upstream_remote = config.getString("branch", branch, "remote");
+        final String upstream_merge = config.getString("branch", branch, "merge");
+        final String remote = options.remote() != null ? options.remote()
+                            : upstream_remote != null ? upstream_remote
+                            : getDefaultRemote();
+        final String remote_branch = remote.equals(upstream_remote)  &&  upstream_merge != null
+                                   ? Repository.shortenRefName(upstream_merge)
+                                   : branch;
+        final String destination = Constants.R_HEADS + remote_branch;
+        RefSpec spec = new RefSpec(Constants.R_HEADS + branch + ":" + destination);
+        final var command = git.push().setRemote(remote);
+        if (options.force())
+        {
+            // Like 'push --force-with-lease': Only replace what we last fetched
+            final ObjectId expected = repository.resolve(Constants.R_REMOTES + remote + "/" + remote_branch);
+            spec = spec.setForceUpdate(true);
+            command.setRefLeaseSpecs(new RefLeaseSpec(destination,
+                                                      expected == null ? ObjectId.zeroId().name() : expected.name()));
+        }
+        command.setRefSpecs(spec);
+        if (options.tags())
+            command.setPushTags();
         configure(command, credentials);
         checkPushResults(command.call());
+
+        // New branch: Track the pushed branch
+        if (upstream_remote == null)
+        {
+            config.setString("branch", branch, "remote", remote);
+            config.setString("branch", branch, "merge", destination);
+            config.save();
+        }
     }
 
     /** Push a tag

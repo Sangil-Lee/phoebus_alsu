@@ -2,6 +2,7 @@ package org.phoebus.applications.git;
 
 import java.io.File;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
@@ -19,6 +20,7 @@ import org.phoebus.applications.git.GitRepository.ChangeType;
 import org.phoebus.applications.git.GitRepository.CommitFile;
 import org.phoebus.applications.git.GitRepository.CommitInfo;
 import org.phoebus.applications.git.GitRepository.FileStatus;
+import org.phoebus.applications.git.GitRepository.PushOptions;
 import org.phoebus.applications.git.GitRepository.RemoteBranch;
 import org.phoebus.applications.git.GitRepository.ResetMode;
 import org.phoebus.applications.git.GitRepository.State;
@@ -45,9 +47,12 @@ import javafx.scene.control.Alert.AlertType;
 import javafx.scene.control.Button;
 import javafx.scene.control.ButtonType;
 import javafx.scene.control.CheckBox;
+import javafx.scene.control.ChoiceDialog;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.Dialog;
 import javafx.scene.control.Label;
+import javafx.scene.control.MenuButton;
+import javafx.scene.control.MenuItem;
 import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.Separator;
 import javafx.scene.control.SplitPane;
@@ -97,6 +102,12 @@ public class GitView implements AppInstance
 
     /** Number of commits to read, increased by 'load more' */
     private volatile int log_count = GitApp.log_count;
+
+    /** Text to search in the history, empty to show all */
+    private volatile String search = "";
+
+    /** Recently opened repositories */
+    private final MenuButton recent = new MenuButton(Messages.Recent);
 
     /** Shown while operations are running */
     private final ProgressIndicator busy = new ProgressIndicator();
@@ -169,8 +180,8 @@ public class GitView implements AppInstance
         final Button fetch = new Button(Messages.Fetch);
         fetch.setOnAction(event -> runAndRefresh(Messages.Fetch, git -> git.fetch(new GitCredentialsProvider(layout))));
 
-        pull.setOnAction(event -> runAndRefresh(Messages.Pull, git -> git.pull(new GitCredentialsProvider(layout))));
-        push.setOnAction(event -> runAndRefresh(Messages.Push, git -> git.push(new GitCredentialsProvider(layout))));
+        pull.setOnAction(event -> pull());
+        push.setOnAction(event -> push());
 
         final Button branch = new Button(Messages.Branch);
         branch.setOnAction(event -> createBranch(null));
@@ -197,7 +208,8 @@ public class GitView implements AppInstance
         clone.setOnAction(event -> cloneRepository());
         final Button create = new Button(Messages.NewRepository);
         create.setOnAction(event -> createRepository());
-        repo_bar.getChildren().setAll(new Label(Messages.Repository), repo_path, browse, clone, create);
+        updateRecentMenu();
+        repo_bar.getChildren().setAll(new Label(Messages.Repository), repo_path, recent, browse, clone, create);
         repo_bar.setAlignment(Pos.CENTER_LEFT);
         repo_bar.setPadding(new Insets(2, 5, 4, 5));
         HBox.setHgrow(repo_path, Priority.ALWAYS);
@@ -338,13 +350,69 @@ public class GitView implements AppInstance
         }
 
         @Override
-        public void commit(final String message, final boolean amend)
+        public void commit(final String message, final boolean amend, final boolean push)
         {
             runAndRefresh(Messages.Commit, git ->
             {
                 git.commit(message, amend);
                 Platform.runLater(file_status::clearMessage);
+                if (push)
+                    git.push(PushOptions.DEFAULT, new GitCredentialsProvider(layout));
             });
+        }
+
+        @Override
+        public void stageHunk(final String path, final int hunk)
+        {
+            runAndRefresh(Messages.StageHunk, git -> git.stageHunk(path, hunk));
+        }
+
+        @Override
+        public void unstageHunk(final String path, final int hunk)
+        {
+            runAndRefresh(Messages.UnstageHunk, git -> git.unstageHunk(path, hunk));
+        }
+
+        @Override
+        public void discardHunk(final String path, final int hunk)
+        {
+            if (confirm(Messages.DiscardHunk, Messages.DiscardHunkConfirm + "\n" + path))
+                runAndRefresh(Messages.DiscardHunk, git -> git.discardHunk(path, hunk));
+        }
+
+        @Override
+        public void resolveConflict(final List<String> paths, final boolean ours)
+        {
+            runAndRefresh(ours ? Messages.ResolveOurs : Messages.ResolveTheirs, git ->
+            {
+                for (String path : paths)
+                    git.resolveConflict(path, ours);
+            });
+        }
+
+        @Override
+        public void ignore(final String path)
+        {
+            GitView.this.ignore(path);
+        }
+
+        @Override
+        public void continueRebase()
+        {
+            runMayConflict(Messages.ContinueRebase, GitRepository::continueRebase);
+        }
+
+        @Override
+        public void skipRebase()
+        {
+            runMayConflict(Messages.SkipRebase, GitRepository::skipRebase);
+        }
+
+        @Override
+        public void abortRebase()
+        {
+            if (confirm(Messages.AbortRebase, Messages.AbortRebaseConfirm))
+                runAndRefresh(Messages.AbortRebase, GitRepository::abortRebase);
         }
 
         @Override
@@ -440,6 +508,13 @@ public class GitView implements AppInstance
         public void showFileHistory(final String path)
         {
             GitView.this.showFileHistory(path);
+        }
+
+        @Override
+        public void search(final String text)
+        {
+            search = text;
+            refresh();
         }
     }
 
@@ -540,6 +615,28 @@ public class GitView implements AppInstance
         public void merge(final String branch)
         {
             GitView.this.merge(branch);
+        }
+
+        @Override
+        public void rebaseOnto(final String branch)
+        {
+            if (last_state != null  &&
+                confirm(Messages.RebaseOnto, Messages.RebaseConfirm + "\n" + last_state.branch() + " \u2192 " + branch))
+                runMayConflict(Messages.RebaseOnto, git -> git.rebase(branch));
+        }
+
+        @Override
+        public void renameBranch(final BranchInfo branch)
+        {
+            final TextInputDialog dialog = new TextInputDialog(branch.name());
+            dialog.setTitle(Messages.RenameBranch);
+            dialog.setHeaderText(branch.name());
+            dialog.setContentText(Messages.BranchName);
+            DialogHelper.positionDialog(dialog, layout, -200, -100);
+            dialog.showAndWait()
+                  .map(String::trim)
+                  .filter(name -> ! name.isEmpty()  &&  ! name.equals(branch.name()))
+                  .ifPresent(name -> runAndRefresh(Messages.RenameBranch, git -> git.renameBranch(branch.name(), name)));
         }
 
         @Override
@@ -898,14 +995,191 @@ public class GitView implements AppInstance
         });
     }
 
+    /** Prompt for pull options and pull */
+    private void pull()
+    {
+        if (last_state == null)
+            return;
+        final BranchInfo current = last_state.branches().stream().filter(BranchInfo::current).findFirst().orElse(null);
+        final Label upstream = new Label(current == null  ||  current.upstream() == null
+                                         ? Messages.NoUpstream
+                                         : last_state.branch() + " \u2190 " + current.upstream());
+        final CheckBox rebase = new CheckBox(Messages.PullRebase);
+        final GridPane grid = new GridPane();
+        grid.setHgap(5);
+        grid.setVgap(5);
+        grid.addRow(0, new Label(Messages.Branch + ":"), upstream);
+        grid.add(rebase, 1, 1);
+
+        final Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.setTitle(Messages.Pull);
+        dialog.setHeaderText(null);
+        dialog.getDialogPane().setContent(grid);
+        dialog.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
+        DialogHelper.positionDialog(dialog, layout, -200, -100);
+        if (dialog.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK)
+            return;
+        final boolean use_rebase = rebase.isSelected();
+        runMayConflict(Messages.Pull, git -> git.pull(new GitCredentialsProvider(layout), use_rebase));
+    }
+
+    /** Prompt for push options and push */
+    private void push()
+    {
+        if (last_state == null)
+            return;
+        final ComboBox<String> remote = new ComboBox<>();
+        remote.getItems().setAll(last_state.remotes().keySet());
+        final ComboBox<String> branch = new ComboBox<>();
+        branch.getItems().setAll(last_state.branches().stream().map(BranchInfo::name).toList());
+        branch.setValue(last_state.branches().stream().filter(BranchInfo::current).map(BranchInfo::name)
+                                  .findFirst().orElse(branch.getItems().isEmpty() ? null : branch.getItems().get(0)));
+        final Label upstream = new Label();
+        // Default remote: Upstream of the branch, else 'origin' or first
+        final Runnable update = () ->
+        {
+            final BranchInfo info = last_state.branches().stream()
+                                              .filter(b -> b.name().equals(branch.getValue()))
+                                              .findFirst().orElse(null);
+            if (info != null  &&  info.upstream() != null)
+            {
+                upstream.setText(Messages.Upstream + ": " + info.upstream());
+                final String upstream_remote = info.upstream().substring(0, info.upstream().indexOf('/'));
+                if (remote.getItems().contains(upstream_remote))
+                    remote.setValue(upstream_remote);
+            }
+            else
+            {
+                upstream.setText(Messages.UpstreamWillBeSet);
+                if (remote.getValue() == null  &&  ! remote.getItems().isEmpty())
+                    remote.setValue(remote.getItems().contains("origin") ? "origin" : remote.getItems().get(0));
+            }
+        };
+        branch.setOnAction(event -> update.run());
+        update.run();
+        final CheckBox tags = new CheckBox(Messages.PushTags);
+        final CheckBox force = new CheckBox(Messages.ForcePush);
+        final Label force_info = new Label(Messages.ForcePushInfo);
+        force_info.setWrapText(true);
+        force_info.setPrefWidth(380);
+        force_info.setStyle("-fx-text-fill: #c62828;");
+        force_info.visibleProperty().bind(force.selectedProperty());
+        force_info.managedProperty().bind(force_info.visibleProperty());
+
+        final GridPane grid = new GridPane();
+        grid.setHgap(5);
+        grid.setVgap(5);
+        grid.addRow(0, new Label(Messages.RemoteName), remote);
+        grid.addRow(1, new Label(Messages.Branch + ":"), branch);
+        grid.add(upstream, 1, 2);
+        grid.add(tags, 1, 3);
+        grid.add(force, 1, 4);
+        grid.add(force_info, 0, 5, 2, 1);
+
+        final Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.setTitle(Messages.Push);
+        dialog.setHeaderText(null);
+        dialog.getDialogPane().setContent(grid);
+        dialog.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
+        DialogHelper.positionDialog(dialog, layout, -200, -100);
+        if (dialog.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK  ||
+            remote.getValue() == null  ||  branch.getValue() == null)
+            return;
+        final PushOptions options = new PushOptions(remote.getValue(), branch.getValue(), tags.isSelected(), force.isSelected());
+        runAndRefresh(Messages.Push, git -> git.push(options, new GitCredentialsProvider(layout)));
+    }
+
+    /** Prompt for pattern to ignore, based on an untracked file, and add it to .gitignore
+     *  @param path Untracked file
+     */
+    private void ignore(final String path)
+    {
+        // Offer the file, files with the same extension, the directory
+        final List<String> patterns = new ArrayList<>();
+        patterns.add(path);
+        final String name = new File(path).getName();
+        final int dot = name.lastIndexOf('.');
+        if (dot > 0)
+            patterns.add("*" + name.substring(dot));
+        final String parent = new File(path).getParent();
+        if (parent != null)
+            patterns.add(parent.replace(File.separatorChar, '/') + "/");
+        final ChoiceDialog<String> dialog = new ChoiceDialog<>(patterns.get(0), patterns);
+        dialog.setTitle(Messages.Ignore);
+        dialog.setHeaderText(Messages.IgnoreInfo);
+        dialog.setContentText(Messages.IgnorePattern);
+        DialogHelper.positionDialog(dialog, layout, -200, -100);
+        dialog.showAndWait().ifPresent(pattern -> runAndRefresh(Messages.Ignore, git -> git.addToIgnore(pattern)));
+    }
+
+    /** Preferences node for the list of recent repositories */
+    private static final String RECENT = "recent_repositories";
+
+    /** Maximum number of recent repositories */
+    private static final int MAX_RECENT = 10;
+
+    /** @return Recently opened repositories, most recent first */
+    private static List<String> getRecent()
+    {
+        final String text = java.util.prefs.Preferences.userNodeForPackage(GitApp.class).get(RECENT, "");
+        return text.isEmpty() ? List.of() : List.of(text.split("\n"));
+    }
+
+    /** @param path Repository to add to the recent repositories */
+    private static void addRecent(final String path)
+    {
+        final List<String> list = new ArrayList<>(getRecent());
+        list.remove(path);
+        list.add(0, path);
+        while (list.size() > MAX_RECENT)
+            list.remove(list.size() - 1);
+        java.util.prefs.Preferences.userNodeForPackage(GitApp.class).put(RECENT, String.join("\n", list));
+    }
+
+    /** Update menu of recent repositories */
+    private void updateRecentMenu()
+    {
+        recent.getItems().clear();
+        for (String path : getRecent())
+        {
+            final MenuItem item = new MenuItem(path);
+            item.setOnAction(event -> setRepository(new File(path)));
+            recent.getItems().add(item);
+        }
+        recent.setDisable(recent.getItems().isEmpty());
+    }
+
     /** Prompt for directory, create new repository there and open it */
     private void createRepository()
     {
-        final DirectoryChooser chooser = new DirectoryChooser();
-        chooser.setTitle(Messages.NewRepository);
-        final File dir = chooser.showDialog(layout.getScene().getWindow());
-        if (dir == null)
+        final TextField path = new TextField();
+        path.setPrefColumnCount(40);
+        final Button browse = new Button(Messages.Browse);
+        browse.setOnAction(event ->
+        {
+            final DirectoryChooser chooser = new DirectoryChooser();
+            final File current = new File(path.getText());
+            if (current.isDirectory())
+                chooser.setInitialDirectory(current);
+            final File chosen = chooser.showDialog(path.getScene().getWindow());
+            if (chosen != null)
+                path.setText(chosen.getAbsolutePath());
+        });
+        final GridPane grid = new GridPane();
+        grid.setHgap(5);
+        grid.setVgap(5);
+        grid.addRow(0, new Label(Messages.Directory), path, browse);
+
+        final Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.setTitle(Messages.NewRepository);
+        dialog.setHeaderText(null);
+        dialog.getDialogPane().setContent(grid);
+        dialog.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
+        DialogHelper.positionDialog(dialog, layout, -200, -100);
+        Platform.runLater(path::requestFocus);
+        if (dialog.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK  ||  path.getText().isBlank())
             return;
+        final File dir = new File(path.getText().trim());
         schedule(Messages.NewRepository, monitor ->
         {
             try
@@ -944,9 +1218,11 @@ public class GitView implements AppInstance
                 if (old != null)
                     old.close();
                 startWatcher();
+                addRecent(new_repo.getWorkTree().getAbsolutePath());
                 Platform.runLater(() ->
                 {
                     repo_path.setText(new_repo.getWorkTree().getAbsolutePath());
+                    updateRecentMenu();
                     sidebar.selectFileStatus();
                 });
                 refresh();
@@ -968,7 +1244,7 @@ public class GitView implements AppInstance
         {
             try
             {
-                final State state = current.getState(log_count, all_branches);
+                final State state = current.getState(log_count, all_branches, search);
                 Platform.runLater(() -> update(state));
             }
             catch (Exception ex)

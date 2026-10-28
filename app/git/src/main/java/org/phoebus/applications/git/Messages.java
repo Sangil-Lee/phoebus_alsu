@@ -10,6 +10,8 @@ public class Messages
     // ---
     public static String AbortMerge;
     public static String AbortMergeConfirm;
+    public static String AbortRebase;
+    public static String AbortRebaseConfirm;
     public static String AddRemote;
     public static String AllBranches;
     public static String AllFiles;
@@ -35,9 +37,11 @@ public class Messages
     public static String ColState;
     public static String ColText;
     public static String Commit;
+    public static String CommitAndPush;
     public static String CommitMessagePrompt;
     public static String Commits;
     public static String ConflictsInfo;
+    public static String ContinueRebase;
     public static String CopyId;
     public static String CreateBranch;
     public static String CreateBranchHere;
@@ -48,8 +52,11 @@ public class Messages
     public static String DeleteRemoteTag;
     public static String DeleteTag;
     public static String Diff;
+    public static String Directory;
     public static String Discard;
     public static String DiscardConfirm;
+    public static String DiscardHunk;
+    public static String DiscardHunkConfirm;
     public static String DisplayName;
     public static String DropStash;
     public static String DropStashConfirm;
@@ -58,12 +65,18 @@ public class Messages
     public static String Fetch;
     public static String FileHistory;
     public static String FileStatus;
+    public static String ForcePush;
+    public static String ForcePushInfo;
     public static String HeaderBranches;
     public static String HeaderRemotes;
     public static String HeaderStashes;
     public static String HeaderTags;
     public static String HeaderWorkspace;
     public static String History;
+    public static String Ignore;
+    public static String IgnoreInfo;
+    public static String IgnorePattern;
+    public static String IgnoreWhitespace;
     public static String LoadMore;
     public static String MenuPath;
     public static String Merge;
@@ -73,16 +86,24 @@ public class Messages
     public static String NewRepository;
     public static String NoFastForward;
     public static String NoRepository;
+    public static String NoUpstream;
     public static String NotCommitted;
     public static String NotMerged;
     public static String PopStash;
     public static String Pull;
+    public static String PullRebase;
     public static String Push;
     public static String PushTag;
+    public static String PushTags;
+    public static String RebaseConfirm;
+    public static String RebaseInProgress;
+    public static String RebaseOnto;
+    public static String Recent;
     public static String Refresh;
     public static String RemoteName;
     public static String RemoteUrl;
     public static String RemoveRemote;
+    public static String RenameBranch;
     public static String Repository;
     public static String Reset;
     public static String ResetHard;
@@ -91,11 +112,17 @@ public class Messages
     public static String ResetMode;
     public static String ResetSoft;
     public static String ResetTo;
+    public static String ResolveOurs;
+    public static String ResolveTheirs;
     public static String Revert;
     public static String SaveCredentials;
+    public static String Search;
+    public static String SearchPrompt;
     public static String SideBySide;
+    public static String SkipRebase;
     public static String Stage;
     public static String StageAll;
+    public static String StageHunk;
     public static String StagedFiles;
     public static String Stash;
     public static String StashMessage;
@@ -107,7 +134,10 @@ public class Messages
     public static String UncommittedChanges;
     public static String Unstage;
     public static String UnstageAll;
+    public static String UnstageHunk;
     public static String UnstagedFiles;
+    public static String Upstream;
+    public static String UpstreamWillBeSet;
     // ---
     // --- Keep alphabetically sorted and 'in sync' with messages.properties!
     // ---

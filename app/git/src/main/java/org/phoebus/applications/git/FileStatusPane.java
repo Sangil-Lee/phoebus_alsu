@@ -45,13 +45,28 @@ class FileStatusPane extends BorderPane
         void unstage(List<String> paths);
         /** Discard unstaged changes, after asking user */
         void discard(List<StatusEntry> entries);
-        void commit(String message, boolean amend);
+        /** @param push Push after the commit? */
+        void commit(String message, boolean amend, boolean push);
         /** Get message of last commit, for amend */
         void getHeadMessage(Consumer<String> handler);
         /** Abort merge, cherry-pick or revert, after asking user */
         void abortMerge();
         /** @param path File to show in the file history */
         void showFileHistory(String path);
+        /** Stage one hunk of the unstaged diff */
+        void stageHunk(String path, int hunk);
+        /** Unstage one hunk of the staged diff */
+        void unstageHunk(String path, int hunk);
+        /** Discard one hunk of the unstaged diff, after asking user */
+        void discardHunk(String path, int hunk);
+        /** @param ours Resolve conflict with our version, or theirs? */
+        void resolveConflict(List<String> paths, boolean ours);
+        /** Prompt for pattern and add it to .gitignore */
+        void ignore(String path);
+        void continueRebase();
+        void skipRebase();
+        /** Abort rebase, after asking user */
+        void abortRebase();
     }
 
     /** Row of a file table: Changed file and check box that stages/unstages it */
@@ -75,9 +90,17 @@ class FileStatusPane extends BorderPane
     private final CheckBox amend = new CheckBox(Messages.Amend);
     private final Button commit = new Button(Messages.Commit);
     private final Button abort = new Button(Messages.AbortMerge);
+    private final CheckBox push = new CheckBox(Messages.CommitAndPush);
+    private final Button continue_rebase = new Button(Messages.ContinueRebase);
+    private final Button skip_rebase = new Button(Messages.SkipRebase);
+    private final Button abort_rebase = new Button(Messages.AbortRebase);
+    private final Label rebase_info = new Label(Messages.RebaseInProgress);
 
     /** Is a merge in progress? */
     private boolean merging = false;
+
+    /** Is a rebase in progress? */
+    private boolean rebasing = false;
 
     /** File shown in the diff, restored after refresh */
     private String diff_path = null;
@@ -134,14 +157,28 @@ class FileStatusPane extends BorderPane
             if (message.isEmpty())
                 commit_message.requestFocus();
             else
-                actions.commit(message, amend.isSelected());
+                actions.commit(message, amend.isSelected(), push.isSelected());
         });
         // Abort is only shown while merging
         abort.setMaxWidth(Double.MAX_VALUE);
         abort.setOnAction(event -> actions.abortMerge());
         abort.managedProperty().bind(abort.visibleProperty());
         abort.setVisible(false);
-        final VBox commit_box = new VBox(5, commit, abort, amend);
+        // Rebase buttons are only shown while rebasing, instead of commit
+        continue_rebase.setOnAction(event -> actions.continueRebase());
+        skip_rebase.setOnAction(event -> actions.skipRebase());
+        abort_rebase.setOnAction(event -> actions.abortRebase());
+        for (var node : List.of(continue_rebase, skip_rebase, abort_rebase, rebase_info))
+        {
+            node.setMaxWidth(Double.MAX_VALUE);
+            node.managedProperty().bind(node.visibleProperty());
+            node.setVisible(false);
+        }
+        rebase_info.setStyle("-fx-text-fill: #6a1b9a; -fx-font-weight: bold;");
+        for (var node : List.of(commit, amend, push))
+            node.managedProperty().bind(node.visibleProperty());
+        final VBox commit_box = new VBox(5, rebase_info, continue_rebase, skip_rebase, abort_rebase,
+                                         commit, abort, amend, push);
         commit_box.setAlignment(Pos.BOTTOM_LEFT);
         final HBox bottom = new HBox(5, commit_message, commit_box);
         bottom.setPadding(new Insets(5));
@@ -200,7 +237,7 @@ class FileStatusPane extends BorderPane
             if (row == null)
                 return;
             other.getSelectionModel().clearSelection();
-            showDiff(row.entry.path(), is_staged);
+            showDiff(row.entry, is_staged);
         });
 
         final ContextMenu menu = new ContextMenu();
@@ -222,13 +259,26 @@ class FileStatusPane extends BorderPane
                                                               .toList()));
             menu.getItems().addAll(stage, discard);
         }
+        // Conflicts: Use one side
+        final MenuItem ours = new MenuItem(Messages.ResolveOurs);
+        ours.setOnAction(event -> actions.resolveConflict(getPaths(table.getSelectionModel().getSelectedItems()), true));
+        final MenuItem theirs = new MenuItem(Messages.ResolveTheirs);
+        theirs.setOnAction(event -> actions.resolveConflict(getPaths(table.getSelectionModel().getSelectedItems()), false));
+        // Untracked: Ignore
+        final MenuItem ignore = new MenuItem(Messages.Ignore);
+        ignore.setOnAction(event -> actions.ignore(table.getSelectionModel().getSelectedItem().entry.path()));
         final MenuItem history = new MenuItem(Messages.FileHistory);
         history.setOnAction(event -> actions.showFileHistory(table.getSelectionModel().getSelectedItem().entry.path()));
-        menu.getItems().add(history);
+        menu.getItems().addAll(ours, theirs, ignore, history);
         menu.setOnShowing(event ->
         {
-            final boolean none = table.getSelectionModel().isEmpty();
+            final List<FileRow> selected = table.getSelectionModel().getSelectedItems();
+            final boolean none = selected.isEmpty();
             menu.getItems().forEach(item -> item.setDisable(none));
+            final boolean conflicts = ! none  &&  selected.stream().allMatch(row -> row.entry.type() == ChangeType.CONFLICT);
+            ours.setVisible(conflicts);
+            theirs.setVisible(conflicts);
+            ignore.setVisible(selected.size() == 1  &&  selected.get(0).entry.type() == ChangeType.UNTRACKED);
         });
         table.setContextMenu(menu);
     }
@@ -268,11 +318,49 @@ class FileStatusPane extends BorderPane
         };
     }
 
-    private void showDiff(final String path, final boolean is_staged)
+    private void showDiff(final StatusEntry entry, final boolean is_staged)
     {
+        final String path = entry.path();
         diff_path = path;
         diff_staged = is_staged;
-        diff.show(git -> is_staged ? git.getStagedDiff(path) : git.getUnstagedDiff(path));
+        // Hunk actions for changed content, not for conflicts, untracked or deleted files
+        final DiffPane.HunkActions hunk_actions;
+        if (is_staged)
+            hunk_actions = new DiffPane.HunkActions()
+            {
+                @Override
+                public List<String> getLabels()
+                {
+                    return List.of(Messages.UnstageHunk);
+                }
+
+                @Override
+                public void run(final int action, final int hunk)
+                {
+                    actions.unstageHunk(path, hunk);
+                }
+            };
+        else if (entry.type() == ChangeType.MODIFIED)
+            hunk_actions = new DiffPane.HunkActions()
+            {
+                @Override
+                public List<String> getLabels()
+                {
+                    return List.of(Messages.StageHunk, Messages.DiscardHunk);
+                }
+
+                @Override
+                public void run(final int action, final int hunk)
+                {
+                    if (action == 0)
+                        actions.stageHunk(path, hunk);
+                    else
+                        actions.discardHunk(path, hunk);
+                }
+            };
+        else
+            hunk_actions = null;
+        diff.show(git -> is_staged ? git.getStagedDiff(path) : git.getUnstagedDiff(path), hunk_actions);
     }
 
     private static List<String> getPaths(final List<FileRow> rows)
@@ -286,7 +374,12 @@ class FileStatusPane extends BorderPane
         staged.getItems().setAll(createRows(status.staged(), true));
         unstaged.getItems().setAll(createRows(status.unstaged(), false));
         merging = status.merging();
+        rebasing = status.rebasing();
         abort.setVisible(merging);
+        for (var node : List.of(continue_rebase, skip_rebase, abort_rebase, rebase_info))
+            node.setVisible(rebasing);
+        for (var node : List.of(commit, amend, push))
+            node.setVisible(! rebasing);
         // Offer the prepared merge message
         if (merging  &&  status.merge_message() != null  &&  commit_message.getText().isBlank())
             commit_message.setText(status.merge_message());

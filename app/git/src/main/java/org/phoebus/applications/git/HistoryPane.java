@@ -23,6 +23,7 @@ import javafx.scene.control.SeparatorMenuItem;
 import javafx.scene.control.SplitPane;
 import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableView;
+import javafx.scene.control.TextField;
 import javafx.scene.input.Clipboard;
 import javafx.scene.input.ClipboardContent;
 import javafx.scene.input.MouseButton;
@@ -57,6 +58,8 @@ class HistoryPane extends BorderPane
         void showFileStatus();
         /** @param path File to show in the file history */
         void showFileHistory(String path);
+        /** @param text Text to search in message, author, id; empty to show all commits */
+        void search(String text);
     }
 
     /** Id of the 'Uncommitted changes' row */
@@ -72,6 +75,7 @@ class HistoryPane extends BorderPane
     private final CheckBox all_branches = new CheckBox(Messages.AllBranches);
     private final CommitFilesPane details;
     private final Label count = new Label();
+    private final TextField search = new TextField();
     private final Button load_more = new Button(Messages.LoadMore);
 
     /** Changed files, shown as 'Uncommitted changes' */
@@ -128,9 +132,19 @@ class HistoryPane extends BorderPane
         all_branches.setSelected(all);
         all_branches.setOnAction(event -> actions.showAllBranches(all_branches.isSelected()));
         load_more.setOnAction(event -> actions.loadMore());
+        search.setPromptText(Messages.SearchPrompt);
+        search.setPrefColumnCount(25);
+        search.setOnAction(event -> actions.search(search.getText().trim()));
+        final Button clear_search = new Button("\u2715");
+        clear_search.setOnAction(event ->
+        {
+            search.clear();
+            actions.search("");
+        });
+        clear_search.visibleProperty().bind(search.textProperty().isNotEmpty());
         final Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
-        final HBox options = new HBox(5, all_branches, spacer, count, load_more);
+        final HBox options = new HBox(5, all_branches, new Label(Messages.Search), search, clear_search, spacer, count, load_more);
         options.setAlignment(Pos.CENTER_LEFT);
         options.setPadding(new Insets(5));
 

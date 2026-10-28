@@ -35,8 +35,23 @@ class DiffPane extends BorderPane
         String get(GitRepository git) throws Exception;
     }
 
+    /** Actions offered for each hunk of a single-file diff */
+    interface HunkActions
+    {
+        /** @return Button labels, one per action */
+        List<String> getLabels();
+
+        /** @param action Index of the action
+         *  @param hunk Index of the hunk in the diff
+         */
+        void run(int action, int hunk);
+    }
+
     /** Side-by-side mode, shared by all diff panes */
     private static final BooleanProperty side_by_side = new SimpleBooleanProperty(false);
+
+    /** Ignore white space, shared by all diff panes */
+    private static final BooleanProperty ignore_whitespace = new SimpleBooleanProperty(false);
 
     private final Supplier<GitRepository> repo;
     private final Consumer<Exception> on_error;
@@ -51,6 +66,16 @@ class DiffPane extends BorderPane
      */
     private final ChangeListener<Boolean> mode_listener = (p, o, n) -> showLines();
 
+    /** Most recent query and hunk actions, to re-compute the diff */
+    private DiffQuery last_query = null;
+    private HunkActions last_actions = null;
+
+    /** Re-computes the diff when the white space option changes, also weak */
+    private final ChangeListener<Boolean> whitespace_listener = (p, o, n) -> recompute();
+
+    /** Hunk actions for the diff that's shown, <code>null</code> if none */
+    private volatile HunkActions hunk_actions = null;
+
     /** Number of the most recent request, older results are dropped */
     private final AtomicLong request = new AtomicLong();
 
@@ -61,18 +86,28 @@ class DiffPane extends BorderPane
     {
         this.repo = repo;
         this.on_error = on_error;
-        unified.setCellFactory(view -> new DiffLineCell());
+        unified.setCellFactory(view -> new DiffLineCell(() -> hunk_actions));
         split.setCellFactory(view -> new SideBySideCell());
 
         final CheckBox toggle = new CheckBox(Messages.SideBySide);
         toggle.selectedProperty().bindBidirectional(side_by_side);
-        final HBox options = new HBox(toggle);
+        final CheckBox whitespace = new CheckBox(Messages.IgnoreWhitespace);
+        whitespace.selectedProperty().bindBidirectional(ignore_whitespace);
+        final HBox options = new HBox(10, whitespace, toggle);
         options.setAlignment(Pos.CENTER_RIGHT);
         options.setPadding(new Insets(2, 5, 2, 5));
         setTop(options);
 
         side_by_side.addListener(new WeakChangeListener<>(mode_listener));
+        ignore_whitespace.addListener(new WeakChangeListener<>(whitespace_listener));
         showLines();
+    }
+
+    /** Compute the most recent diff again */
+    private void recompute()
+    {
+        if (last_query != null)
+            show(last_query, last_actions);
     }
 
     /** Compute diff in background and show it
@@ -80,20 +115,40 @@ class DiffPane extends BorderPane
      */
     void show(final DiffQuery query)
     {
+        show(query, null);
+    }
+
+    /** Compute diff of a single file in background and show it
+     *  @param query Computes the diff
+     *  @param actions Actions for each hunk, <code>null</code> for none
+     */
+    void show(final DiffQuery query, final HunkActions actions)
+    {
+        last_query = query;
+        last_actions = actions;
         final GitRepository current = repo.get();
         if (current == null)
             return;
+        final boolean ignore = ignore_whitespace.get();
         final long this_request = request.incrementAndGet();
         JobManager.schedule(Messages.Diff, monitor ->
         {
             try
             {
-                final List<String> result = Arrays.asList(query.get(current).split("\\R", -1));
+                final List<String> result;
+                // White space setting and query in one step, not interrupted by other diff requests
+                synchronized (current)
+                {
+                    current.setIgnoreWhitespace(ignore);
+                    result = Arrays.asList(query.get(current).split("\\R", -1));
+                }
                 Platform.runLater(() ->
                 {
                     if (this_request == request.get())
                     {
                         lines = result;
+                        // Hunks differ when white space is ignored, offer actions only for the complete diff
+                        hunk_actions = ignore ? null : actions;
                         showLines();
                     }
                 });
@@ -108,6 +163,9 @@ class DiffPane extends BorderPane
     /** Clear the diff, dropping pending results */
     void clear()
     {
+        last_query = null;
+        last_actions = null;
+        hunk_actions = null;
         request.incrementAndGet();
         lines = List.of();
         showLines();
