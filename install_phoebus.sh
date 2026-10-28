@@ -45,7 +45,7 @@ NOSUDO_STAGES=(paths exist status)
 ## Where the Phoebus source comes from. 'fork' and 'upstream' are shortcuts,
 ## any git URL is accepted as well. When the script sits inside a checkout that
 ## checkout is used as is and nothing is cloned.
-SRC_REPO_FORK="https://github.com/Sangil-Lee/phoebus"
+SRC_REPO_FORK="https://github.com/Sangil-Lee/phoebus_alsu"
 SRC_REPO_UPSTREAM="https://github.com/ControlSystemStudio/phoebus"
 SRC_REPO=""                      # --src-repo=fork | upstream | URL
 SRC_REF="master"                 # --src-ref=BRANCH|TAG|COMMIT

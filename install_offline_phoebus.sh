@@ -66,7 +66,7 @@ BUNDLE_PACK="true"               # --no-pack   : do not create the tar.gz
 
 ## Where the Phoebus source comes from, used by 'bundle' and 'build' on the
 ## machine which has the network. The offline machine never needs it.
-SRC_REPO_FORK="https://github.com/Sangil-Lee/phoebus"
+SRC_REPO_FORK="https://github.com/Sangil-Lee/phoebus_alsu"
 SRC_REPO_UPSTREAM="https://github.com/ControlSystemStudio/phoebus"
 SRC_REPO=""                      # --src-repo=fork | upstream | URL
 SRC_REF="master"                 # --src-ref=BRANCH|TAG|COMMIT
