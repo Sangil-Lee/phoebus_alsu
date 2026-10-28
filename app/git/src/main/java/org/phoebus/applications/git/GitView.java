@@ -3,20 +3,24 @@ package org.phoebus.applications.git;
 import java.io.File;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import org.eclipse.jgit.api.errors.NotMergedException;
 import org.eclipse.jgit.lib.Constants;
 import org.phoebus.applications.git.GitRepository.BranchInfo;
 import org.phoebus.applications.git.GitRepository.CommitInfo;
 import org.phoebus.applications.git.GitRepository.RemoteBranch;
+import org.phoebus.applications.git.GitRepository.ResetMode;
 import org.phoebus.applications.git.GitRepository.State;
 import org.phoebus.applications.git.GitRepository.StatusEntry;
 import org.phoebus.applications.git.GitRepository.StashInfo;
 import org.phoebus.applications.git.GitRepository.TagInfo;
 import org.phoebus.framework.jobs.JobManager;
+import org.phoebus.framework.jobs.JobRunnable;
 import org.phoebus.framework.persistence.Memento;
 import org.phoebus.framework.spi.AppDescriptor;
 import org.phoebus.framework.spi.AppInstance;
@@ -36,6 +40,7 @@ import javafx.scene.control.CheckBox;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.Dialog;
 import javafx.scene.control.Label;
+import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.Separator;
 import javafx.scene.control.SplitPane;
 import javafx.scene.control.TextField;
@@ -78,6 +83,16 @@ public class GitView implements AppInstance
 
     /** Show history of all branches, or only the current one? */
     private volatile boolean all_branches = true;
+
+    /** Number of commits to read, increased by 'load more' */
+    private volatile int log_count = GitApp.log_count;
+
+    /** Shown while operations are running */
+    private final ProgressIndicator busy = new ProgressIndicator();
+    private final Label busy_label = new Label();
+
+    /** Number of running operations */
+    private final AtomicInteger active = new AtomicInteger();
 
     /** Most recent state, used to list branches for merge. Only accessed on UI thread */
     private State last_state = null;
@@ -140,7 +155,50 @@ public class GitView implements AppInstance
         HBox.setHgrow(repo_box, Priority.ALWAYS);
         HBox.setHgrow(repo_path, Priority.ALWAYS);
 
-        return new ToolBar(fetch, pull, push, new Separator(), branch, merge, tag, stash, new Separator(), refresh, repo_box);
+        busy.setPrefSize(18, 18);
+        busy.setVisible(false);
+        busy_label.setVisible(false);
+
+        return new ToolBar(fetch, pull, push, new Separator(), branch, merge, tag, stash, new Separator(), refresh,
+                           busy, busy_label, repo_box);
+    }
+
+    /** Run operation in background while showing the busy indicator
+     *
+     *  <p>Repository calls are serialized by {@link GitRepository},
+     *  so operations queue up instead of failing on a locked index.
+     *
+     *  @param name Operation name, shown next to the busy indicator
+     *  @param runnable Operation
+     */
+    private void schedule(final String name, final JobRunnable runnable)
+    {
+        updateBusy(active.incrementAndGet(), name);
+        JobManager.schedule(name, monitor ->
+        {
+            try
+            {
+                runnable.run(monitor);
+            }
+            finally
+            {
+                updateBusy(active.decrementAndGet(), null);
+            }
+        });
+    }
+
+    /** @param count Number of running operations
+     *  @param name Name of the operation that was just started, or <code>null</code>
+     */
+    private void updateBusy(final int count, final String name)
+    {
+        Platform.runLater(() ->
+        {
+            busy.setVisible(count > 0);
+            busy_label.setVisible(count > 0);
+            if (name != null)
+                busy_label.setText(name + "...");
+        });
     }
 
     /** Handle file status actions */
@@ -188,7 +246,7 @@ public class GitView implements AppInstance
             final GitRepository current = repo;
             if (current == null)
                 return;
-            JobManager.schedule(Messages.Amend, monitor ->
+            schedule(Messages.Amend, monitor ->
             {
                 try
                 {
@@ -244,6 +302,25 @@ public class GitView implements AppInstance
         {
             if (confirm(Messages.Revert, Messages.Revert + ": " + commit.message()))
                 runMayConflict(Messages.Revert, git -> git.revert(commit.id()));
+        }
+
+        @Override
+        public void reset(final CommitInfo commit)
+        {
+            GitView.this.reset(commit);
+        }
+
+        @Override
+        public void loadMore()
+        {
+            log_count += GitApp.log_count;
+            refresh();
+        }
+
+        @Override
+        public void showFileStatus()
+        {
+            sidebar.selectFileStatus();
         }
     }
 
@@ -352,6 +429,71 @@ public class GitView implements AppInstance
             if (confirm(Messages.DeleteTag, Messages.DeleteTag + ": " + tag.name()))
                 runAndRefresh(Messages.DeleteTag, git -> git.deleteTag(tag.name()));
         }
+
+        @Override
+        public void deleteRemoteTag(final TagInfo tag)
+        {
+            if (confirm(Messages.DeleteRemoteTag, Messages.DeleteRemoteTag + ": " + tag.name()))
+                runAndRefresh(Messages.DeleteRemoteTag,
+                              git -> git.deleteRemoteTag(tag.name(), new GitCredentialsProvider(layout)));
+        }
+
+        @Override
+        public void addRemote()
+        {
+            final TextField name = new TextField(last_state != null  &&  last_state.remotes().isEmpty() ? "origin" : "");
+            final TextField url = new TextField();
+            url.setPrefColumnCount(40);
+            url.setPromptText("https://host/group/repo.git, git@host:group/repo.git");
+            if (promptRemote(Messages.AddRemote, name, url))
+            {
+                final String remote = name.getText().trim(), address = url.getText().trim();
+                runAndRefresh(Messages.AddRemote, git -> git.addRemote(remote, address));
+            }
+        }
+
+        @Override
+        public void editRemote(final String name, final String url)
+        {
+            final TextField name_field = new TextField(name);
+            name_field.setEditable(false);
+            final TextField url_field = new TextField(url == null ? "" : url);
+            url_field.setPrefColumnCount(40);
+            if (promptRemote(Messages.EditRemote, name_field, url_field))
+            {
+                final String address = url_field.getText().trim();
+                runAndRefresh(Messages.EditRemote, git -> git.setRemoteUrl(name, address));
+            }
+        }
+
+        @Override
+        public void removeRemote(final String name)
+        {
+            if (confirm(Messages.RemoveRemote, Messages.RemoveRemote + ": " + name))
+                runAndRefresh(Messages.RemoveRemote, git -> git.removeRemote(name));
+        }
+    }
+
+    /** Prompt for remote name and URL
+     *  @return <code>true</code> if user confirmed with non-empty name and URL
+     */
+    private boolean promptRemote(final String title, final TextField name, final TextField url)
+    {
+        final GridPane grid = new GridPane();
+        grid.setHgap(5);
+        grid.setVgap(5);
+        grid.addRow(0, new Label(Messages.RemoteName), name);
+        grid.addRow(1, new Label(Messages.RemoteUrl), url);
+
+        final Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.setTitle(title);
+        dialog.setHeaderText(null);
+        dialog.getDialogPane().setContent(grid);
+        dialog.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
+        DialogHelper.positionDialog(dialog, layout, -200, -100);
+        Platform.runLater(() -> (name.isEditable() && name.getText().isEmpty() ? name : url).requestFocus());
+        return dialog.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK  &&
+               ! name.getText().isBlank()  &&  ! url.getText().isBlank();
     }
 
     /** @return <code>true</code> if user confirmed */
@@ -466,6 +608,46 @@ public class GitView implements AppInstance
         }
     }
 
+    /** Prompt for reset mode and reset the current branch to a commit
+     *  @param commit Target commit
+     */
+    private void reset(final CommitInfo commit)
+    {
+        final ComboBox<ResetMode> mode = new ComboBox<>();
+        mode.getItems().setAll(ResetMode.values());
+        mode.setValue(ResetMode.MIXED);
+        final Label info = new Label();
+        info.setWrapText(true);
+        info.setPrefWidth(380);
+        final Runnable update_info = () -> info.setText(switch (mode.getValue())
+        {
+            case SOFT  -> Messages.ResetSoft;
+            case MIXED -> Messages.ResetMixed;
+            case HARD  -> Messages.ResetHard;
+        });
+        mode.setOnAction(event -> update_info.run());
+        update_info.run();
+        final GridPane grid = new GridPane();
+        grid.setHgap(5);
+        grid.setVgap(5);
+        grid.addRow(0, new Label(Messages.ResetMode), mode);
+        grid.add(info, 0, 1, 2, 1);
+
+        final Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.setTitle(Messages.Reset);
+        dialog.setHeaderText(Messages.ResetTo + " " + commit.id().substring(0, 7) + " " + commit.message());
+        dialog.getDialogPane().setContent(grid);
+        dialog.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
+        DialogHelper.positionDialog(dialog, layout, -200, -100);
+        if (dialog.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK)
+            return;
+        final ResetMode selected = mode.getValue();
+        // Hard reset discards changes, ask again
+        if (selected == ResetMode.HARD  &&  ! confirm(Messages.Reset, Messages.ResetHardConfirm))
+            return;
+        runAndRefresh(Messages.Reset, git -> git.reset(commit.id(), selected));
+    }
+
     /** Prompt for stash message and stash local changes */
     private void stash()
     {
@@ -507,11 +689,12 @@ public class GitView implements AppInstance
     /** @param directory Directory in a git work tree to show */
     public void setRepository(final File directory)
     {
-        JobManager.schedule(Messages.DisplayName, monitor ->
+        schedule(Messages.DisplayName, monitor ->
         {
             try
             {
                 final GitRepository new_repo = new GitRepository(directory);
+                log_count = GitApp.log_count;
                 final GitRepository old = repo;
                 repo = new_repo;
                 if (old != null)
@@ -536,11 +719,11 @@ public class GitView implements AppInstance
         final GitRepository current = repo;
         if (current == null)
             return;
-        JobManager.schedule(Messages.Refresh, monitor ->
+        schedule(Messages.Refresh, monitor ->
         {
             try
             {
-                final State state = current.getState(GitApp.log_count, all_branches);
+                final State state = current.getState(log_count, all_branches);
                 Platform.runLater(() -> update(state));
             }
             catch (Exception ex)
@@ -559,7 +742,13 @@ public class GitView implements AppInstance
                                            .filter(BranchInfo::current)
                                            .map(b -> Constants.R_HEADS + b.name())
                                            .findFirst().orElse(null);
-        history.setCommits(state.log(), current_branch);
+        final List<String> changed = Stream.concat(state.status().staged().stream(),
+                                                                    state.status().unstaged().stream())
+                                                            .map(StatusEntry::path)
+                                                            .distinct()
+                                                            .sorted()
+                                                            .toList();
+        history.setCommits(state.log(), current_branch, log_count, changed);
         stash_diff.clear();
         // Update side bar last, it may re-select a branch and thus a commit in the history
         sidebar.update(state);
@@ -582,7 +771,7 @@ public class GitView implements AppInstance
         final GitRepository current = repo;
         if (current == null)
             return;
-        JobManager.schedule(name, monitor ->
+        schedule(name, monitor ->
         {
             try
             {

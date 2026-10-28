@@ -10,6 +10,7 @@ public class Messages
     // ---
     public static String AbortMerge;
     public static String AbortMergeConfirm;
+    public static String AddRemote;
     public static String AllBranches;
     public static String Amend;
     public static String ApplyStash;
@@ -28,6 +29,7 @@ public class Messages
     public static String ColState;
     public static String Commit;
     public static String CommitMessagePrompt;
+    public static String Commits;
     public static String ConflictsInfo;
     public static String CopyId;
     public static String CreateBranch;
@@ -36,6 +38,7 @@ public class Messages
     public static String CredentialsTitle;
     public static String DeleteBranch;
     public static String DeleteBranchConfirm;
+    public static String DeleteRemoteTag;
     public static String DeleteTag;
     public static String Diff;
     public static String Discard;
@@ -43,6 +46,7 @@ public class Messages
     public static String DisplayName;
     public static String DropStash;
     public static String DropStashConfirm;
+    public static String EditRemote;
     public static String ErrorTitle;
     public static String Fetch;
     public static String FileStatus;
@@ -52,6 +56,7 @@ public class Messages
     public static String HeaderTags;
     public static String HeaderWorkspace;
     public static String History;
+    public static String LoadMore;
     public static String MenuPath;
     public static String Merge;
     public static String MergeBranch;
@@ -65,7 +70,17 @@ public class Messages
     public static String Push;
     public static String PushTag;
     public static String Refresh;
+    public static String RemoteName;
+    public static String RemoteUrl;
+    public static String RemoveRemote;
     public static String Repository;
+    public static String Reset;
+    public static String ResetHard;
+    public static String ResetHardConfirm;
+    public static String ResetMixed;
+    public static String ResetMode;
+    public static String ResetSoft;
+    public static String ResetTo;
     public static String Revert;
     public static String SaveCredentials;
     public static String SideBySide;
@@ -79,6 +94,7 @@ public class Messages
     public static String TagMessage;
     public static String TagMessagePrompt;
     public static String TagName;
+    public static String UncommittedChanges;
     public static String Unstage;
     public static String UnstageAll;
     public static String UnstagedFiles;

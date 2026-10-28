@@ -2,6 +2,7 @@ package org.phoebus.applications.git;
 
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
@@ -10,18 +11,24 @@ import org.phoebus.applications.git.GitRepository.CommitInfo;
 
 import javafx.beans.property.ReadOnlyObjectWrapper;
 import javafx.geometry.Insets;
+import javafx.geometry.Pos;
 import javafx.geometry.Orientation;
+import javafx.scene.control.Button;
 import javafx.scene.control.CheckBox;
+import javafx.scene.control.Label;
 import javafx.scene.control.ContextMenu;
 import javafx.scene.control.MenuItem;
 import javafx.scene.control.SeparatorMenuItem;
 import javafx.scene.control.SplitPane;
 import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableView;
-import javafx.scene.layout.BorderPane;
 import javafx.scene.input.Clipboard;
 import javafx.scene.input.ClipboardContent;
+import javafx.scene.input.MouseButton;
+import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
+import javafx.scene.layout.Priority;
+import javafx.scene.layout.Region;
 
 /** Commit history with graph, and diff of the selected commit */
 @SuppressWarnings("nls")
@@ -41,11 +48,31 @@ class HistoryPane extends BorderPane
         void createBranch(String commit);
         void cherryPick(CommitInfo commit);
         void revert(CommitInfo commit);
+        /** Reset current branch to commit, after asking for the mode */
+        void reset(CommitInfo commit);
+        /** Read more commits */
+        void loadMore();
+        /** Show the uncommitted changes in the file status */
+        void showFileStatus();
+    }
+
+    /** Id of the 'Uncommitted changes' row */
+    static final String UNCOMMITTED = "";
+
+    /** @return Is this the 'Uncommitted changes' row, not an actual commit? */
+    static boolean isUncommitted(final CommitInfo commit)
+    {
+        return commit != null  &&  UNCOMMITTED.equals(commit.id());
     }
 
     private final TableView<CommitInfo> history = new TableView<>();
     private final CheckBox all_branches = new CheckBox(Messages.AllBranches);
     private final DiffPane diff;
+    private final Label count = new Label();
+    private final Button load_more = new Button(Messages.LoadMore);
+
+    /** Changed files, shown as 'Uncommitted changes' */
+    private List<String> uncommitted = List.of();
 
     /** Full name of checked out branch, used to highlight its label */
     private String current_branch = null;
@@ -69,9 +96,9 @@ class HistoryPane extends BorderPane
         description.setCellValueFactory(cell -> new ReadOnlyObjectWrapper<>(cell.getValue()));
         description.setCellFactory(col -> new CommitGraphCell(() -> current_branch, () -> graph_width));
         history.getColumns().add(description);
-        history.getColumns().add(TableHelper.createColumn(Messages.ColDate, 130, c -> DATE_FORMAT.format(c.date())));
+        history.getColumns().add(TableHelper.createColumn(Messages.ColDate, 130, c -> c.date() == null ? "" : DATE_FORMAT.format(c.date())));
         history.getColumns().add(TableHelper.createColumn(Messages.ColAuthor, 130, c -> c.author()));
-        history.getColumns().add(TableHelper.createColumn(Messages.ColId, 70, c -> c.id().substring(0, 7)));
+        history.getColumns().add(TableHelper.createColumn(Messages.ColId, 70, c -> isUncommitted(c) ? "" : c.id().substring(0, 7)));
         // Order is defined by the graph, sorting would break it
         for (TableColumn<CommitInfo, ?> col : history.getColumns())
             col.setSortable(false);
@@ -79,13 +106,29 @@ class HistoryPane extends BorderPane
         history.setContextMenu(createContextMenu(actions));
         history.getSelectionModel().selectedItemProperty().addListener((prop, old, commit) ->
         {
-            if (commit != null)
+            if (isUncommitted(commit))
+            {
+                final List<String> paths = uncommitted;
+                diff.show(git -> git.getUncommittedDiff(paths));
+            }
+            else if (commit != null)
                 diff.show(git -> git.getCommitDiff(commit.id()));
+        });
+        // Double-click on 'Uncommitted changes' opens the file status to stage and commit
+        history.setOnMouseClicked(event ->
+        {
+            if (event.getButton() == MouseButton.PRIMARY  &&  event.getClickCount() == 2  &&
+                isUncommitted(getSelected()))
+                actions.showFileStatus();
         });
 
         all_branches.setSelected(all);
         all_branches.setOnAction(event -> actions.showAllBranches(all_branches.isSelected()));
-        final HBox options = new HBox(5, all_branches);
+        load_more.setOnAction(event -> actions.loadMore());
+        final Region spacer = new Region();
+        HBox.setHgrow(spacer, Priority.ALWAYS);
+        final HBox options = new HBox(5, all_branches, spacer, count, load_more);
+        options.setAlignment(Pos.CENTER_LEFT);
         options.setPadding(new Insets(5));
 
         final SplitPane split = new SplitPane(history, diff);
@@ -106,6 +149,8 @@ class HistoryPane extends BorderPane
         cherry_pick.setOnAction(event -> actions.cherryPick(getSelected()));
         final MenuItem revert = new MenuItem(Messages.Revert);
         revert.setOnAction(event -> actions.revert(getSelected()));
+        final MenuItem reset = new MenuItem(Messages.Reset);
+        reset.setOnAction(event -> actions.reset(getSelected()));
         final MenuItem copy = new MenuItem(Messages.CopyId);
         copy.setOnAction(event ->
         {
@@ -114,10 +159,12 @@ class HistoryPane extends BorderPane
             Clipboard.getSystemClipboard().setContent(content);
         });
         final ContextMenu menu = new ContextMenu(tag, branch, new SeparatorMenuItem(),
-                                                 cherry_pick, revert, new SeparatorMenuItem(), copy);
+                                                 cherry_pick, revert, reset, new SeparatorMenuItem(), copy);
         menu.setOnShowing(event ->
         {
-            final boolean none = getSelected() == null;
+            // Commit operations need an actual commit
+            final CommitInfo selected = getSelected();
+            final boolean none = selected == null  ||  isUncommitted(selected);
             menu.getItems().forEach(item -> item.setDisable(none));
         });
         return menu;
@@ -130,18 +177,41 @@ class HistoryPane extends BorderPane
 
     /** @param commits Commits to show
      *  @param current_branch Full name of the checked out branch, e.g. "refs/heads/master", or <code>null</code>
+     *  @param requested Number of commits that were requested; if that many were found, there may be more
+     *  @param changed Files with uncommitted changes, shown as first row
      */
-    void setCommits(final List<CommitInfo> commits, final String current_branch)
+    void setCommits(final List<CommitInfo> commits, final String current_branch,
+                    final int requested, final List<String> changed)
     {
         this.current_branch = current_branch;
+        this.uncommitted = changed;
         // Lanes are 14 pixels wide (JGit AbstractPlotRenderer), plus space for the dot.
         // Very wide graphs are not padded, their messages simply start later
         final int lanes = commits.stream()
                                  .mapToInt(c -> c.plot().getLane() == null ? 0 : c.plot().getLane().getPosition() + 1)
                                  .max().orElse(1);
         graph_width = 14 * Math.min(lanes, 12) + 16;
+
+        final List<CommitInfo> rows = new ArrayList<>(commits.size() + 1);
+        if (! changed.isEmpty())
+            rows.add(new CommitInfo(UNCOMMITTED, Messages.UncommittedChanges + " (" + changed.size() + ")",
+                                    "", null, null));
+        rows.addAll(commits);
+
+        // Keep selection of the same commit
+        final CommitInfo selected = getSelected();
         diff.clear();
-        history.getItems().setAll(commits);
+        history.getItems().setAll(rows);
+        if (selected != null)
+            for (CommitInfo row : rows)
+                if (row.id().equals(selected.id()))
+                {
+                    history.getSelectionModel().select(row);
+                    break;
+                }
+
+        count.setText(String.format(Messages.Commits, commits.size()));
+        load_more.setVisible(commits.size() >= requested);
     }
 
     /** @param all Show all branches? Updates the check box, caller needs to refresh */

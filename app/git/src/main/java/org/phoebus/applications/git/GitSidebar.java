@@ -13,6 +13,7 @@ import org.phoebus.applications.git.GitRepository.TagInfo;
 
 import javafx.scene.control.ContextMenu;
 import javafx.scene.control.MenuItem;
+import javafx.scene.control.Tooltip;
 import javafx.scene.control.TreeCell;
 import javafx.scene.control.TreeItem;
 import javafx.scene.control.TreeView;
@@ -41,6 +42,14 @@ class GitSidebar extends TreeView<Object>
         void merge(String branch);
         void pushTag(TagInfo tag);
         void deleteTag(TagInfo tag);
+        /** Delete tag on the remote, after asking user */
+        void deleteRemoteTag(TagInfo tag);
+        /** Prompt for name and URL, add remote */
+        void addRemote();
+        /** Prompt for new URL of a remote */
+        void editRemote(String name, String url);
+        /** Remove a remote, after asking user */
+        void removeRemote(String name);
     }
 
     /** Section header */
@@ -50,7 +59,7 @@ class GitSidebar extends TreeView<Object>
     private record Workspace(String label, boolean history) {}
 
     /** Remote, parent of its branches */
-    private record Remote(String name) {}
+    private record Remote(String name, String url) {}
 
     private final Actions actions;
 
@@ -183,7 +192,7 @@ class GitSidebar extends TreeView<Object>
         remotes.getChildren().clear();
         for (Map.Entry<String, List<RemoteBranch>> entry : state.remotes().entrySet())
         {
-            final TreeItem<Object> remote = new TreeItem<>(new Remote(entry.getKey()));
+            final TreeItem<Object> remote = new TreeItem<>(new Remote(entry.getKey(), state.remote_urls().get(entry.getKey())));
             remote.getChildren().setAll(entry.getValue().stream().map(b -> new TreeItem<Object>(b)).toList());
             remote.setExpanded(expanded_remotes.contains(entry.getKey()));
             remotes.getChildren().add(remote);
@@ -215,6 +224,7 @@ class GitSidebar extends TreeView<Object>
             super.updateItem(value, empty);
             setStyle(null);
             setContextMenu(null);
+            setTooltip(null);
             if (empty  ||  value == null)
             {
                 setText(null);
@@ -224,6 +234,12 @@ class GitSidebar extends TreeView<Object>
             {
                 setText(header.label());
                 setStyle("-fx-font-weight: bold; -fx-text-fill: gray;");
+                if (getTreeItem() == remotes)
+                {
+                    final MenuItem add = new MenuItem(Messages.AddRemote);
+                    add.setOnAction(event -> actions.addRemote());
+                    setContextMenu(new ContextMenu(add));
+                }
             }
             else if (value instanceof Workspace ws)
                 setText(ws.label());
@@ -240,7 +256,16 @@ class GitSidebar extends TreeView<Object>
                 setContextMenu(createMenu(branch));
             }
             else if (value instanceof Remote remote)
+            {
                 setText(remote.name());
+                if (remote.url() != null)
+                    setTooltip(new Tooltip(remote.url()));
+                final MenuItem edit = new MenuItem(Messages.EditRemote);
+                edit.setOnAction(event -> actions.editRemote(remote.name(), remote.url()));
+                final MenuItem remove = new MenuItem(Messages.RemoveRemote);
+                remove.setOnAction(event -> actions.removeRemote(remote.name()));
+                setContextMenu(new ContextMenu(edit, remove));
+            }
             else if (value instanceof RemoteBranch branch)
             {
                 setText(branch.name());
@@ -267,7 +292,9 @@ class GitSidebar extends TreeView<Object>
         push.setOnAction(event -> actions.pushTag(tag));
         final MenuItem delete = new MenuItem(Messages.DeleteTag);
         delete.setOnAction(event -> actions.deleteTag(tag));
-        return new ContextMenu(create, push, delete);
+        final MenuItem delete_remote = new MenuItem(Messages.DeleteRemoteTag);
+        delete_remote.setOnAction(event -> actions.deleteRemoteTag(tag));
+        return new ContextMenu(create, push, delete, delete_remote);
     }
 
     private ContextMenu createMenu(final BranchInfo branch)

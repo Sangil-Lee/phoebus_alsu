@@ -55,15 +55,19 @@ import org.eclipse.jgit.transport.PushResult;
 import org.eclipse.jgit.transport.RefSpec;
 import org.eclipse.jgit.transport.RemoteRefUpdate;
 import org.eclipse.jgit.transport.SshTransport;
+import org.eclipse.jgit.transport.URIish;
 import org.eclipse.jgit.treewalk.AbstractTreeIterator;
 import org.eclipse.jgit.treewalk.CanonicalTreeParser;
 import org.eclipse.jgit.treewalk.EmptyTreeIterator;
 import org.eclipse.jgit.treewalk.FileTreeIterator;
 import org.eclipse.jgit.treewalk.filter.PathFilter;
+import org.eclipse.jgit.treewalk.filter.PathFilterGroup;
 
 /** Thin wrapper around JGit for the operations used by the UI
  *
  *  <p>All calls block, so invoke them from a background job.
+ *  Calls are serialized, so that for example a refresh that updates
+ *  the index does not collide with a commit and fail on the index lock.
  */
 public class GitRepository implements AutoCloseable
 {
@@ -150,9 +154,11 @@ public class GitRepository implements AutoCloseable
     /** Snapshot of everything shown in the UI
      *  @param branch Current branch, or commit id for detached HEAD
      *  @param remotes Branches of each remote, by remote name
+     *  @param remote_urls URL of each remote, by remote name
      */
     public record State(String branch, FileStatus status, List<CommitInfo> log,
                         List<BranchInfo> branches, Map<String, List<RemoteBranch>> remotes,
+                        Map<String, String> remote_urls,
                         List<TagInfo> tags, List<StashInfo> stashes) {}
 
     private final Git git;
@@ -175,7 +181,7 @@ public class GitRepository implements AutoCloseable
     }
 
     /** @return Current branch name */
-    public String getBranch() throws Exception
+    public synchronized String getBranch() throws Exception
     {
         return git.getRepository().getBranch();
     }
@@ -184,14 +190,47 @@ public class GitRepository implements AutoCloseable
      *  @param all_branches Show history of all branches, or only the current one?
      *  @return Current state of the repository
      */
-    public State getState(final int log_count, final boolean all_branches) throws Exception
+    public synchronized State getState(final int log_count, final boolean all_branches) throws Exception
     {
         return new State(getBranch(), getStatus(), getLog(log_count, all_branches),
-                         getBranches(), getRemoteBranches(), getTags(), getStashes());
+                         getBranches(), getRemoteBranches(), getRemoteUrls(), getTags(), getStashes());
+    }
+
+    /** @return URL of each remote, by remote name */
+    public synchronized Map<String, String> getRemoteUrls()
+    {
+        final Map<String, String> result = new LinkedHashMap<>();
+        for (String remote : git.getRepository().getRemoteNames().stream().sorted().toList())
+            result.put(remote, git.getRepository().getConfig().getString("remote", remote, "url"));
+        return result;
+    }
+
+    /** @param name Name of new remote
+     *  @param url Remote URL
+     */
+    public synchronized void addRemote(final String name, final String url) throws Exception
+    {
+        if (git.getRepository().getRemoteNames().contains(name))
+            throw new Exception("Remote '" + name + "' already exists");
+        git.remoteAdd().setName(name).setUri(new URIish(url)).call();
+    }
+
+    /** @param name Remote
+     *  @param url New URL
+     */
+    public synchronized void setRemoteUrl(final String name, final String url) throws Exception
+    {
+        git.remoteSetUrl().setRemoteName(name).setRemoteUri(new URIish(url)).call();
+    }
+
+    /** @param name Remote to remove, including its remote tracking branches */
+    public synchronized void removeRemote(final String name) throws Exception
+    {
+        git.remoteRemove().setRemoteName(name).call();
     }
 
     /** @return Local branches */
-    public List<BranchInfo> getBranches() throws Exception
+    public synchronized List<BranchInfo> getBranches() throws Exception
     {
         final Repository repository = git.getRepository();
         final String current = repository.getFullBranch();
@@ -209,7 +248,7 @@ public class GitRepository implements AutoCloseable
     }
 
     /** @return Branches of each remote, including remotes without branches */
-    public Map<String, List<RemoteBranch>> getRemoteBranches() throws Exception
+    public synchronized Map<String, List<RemoteBranch>> getRemoteBranches() throws Exception
     {
         final Map<String, List<RemoteBranch>> result = new LinkedHashMap<>();
         for (String remote : git.getRepository().getRemoteNames().stream().sorted().toList())
@@ -231,7 +270,7 @@ public class GitRepository implements AutoCloseable
     }
 
     /** @return Tags */
-    public List<TagInfo> getTags() throws Exception
+    public synchronized List<TagInfo> getTags() throws Exception
     {
         final Repository repository = git.getRepository();
         final List<TagInfo> result = new ArrayList<>();
@@ -246,7 +285,7 @@ public class GitRepository implements AutoCloseable
     }
 
     /** @return Stash entries, most recent first */
-    public List<StashInfo> getStashes() throws Exception
+    public synchronized List<StashInfo> getStashes() throws Exception
     {
         final List<StashInfo> result = new ArrayList<>();
         int index = 0;
@@ -256,7 +295,7 @@ public class GitRepository implements AutoCloseable
     }
 
     /** @return Staged and unstaged changes */
-    public FileStatus getStatus() throws Exception
+    public synchronized FileStatus getStatus() throws Exception
     {
         final Status status = git.status().call();
         // Conflicts are only listed as such, as unstaged
@@ -313,7 +352,7 @@ public class GitRepository implements AutoCloseable
      *  @param all_branches Include all local and remote branches and tags, or only HEAD?
      *  @return Most recent commits with commit graph information, newest first
      */
-    public List<CommitInfo> getLog(final int count, final boolean all_branches) throws Exception
+    public synchronized List<CommitInfo> getLog(final int count, final boolean all_branches) throws Exception
     {
         final Repository repository = git.getRepository();
         final List<CommitInfo> result = new ArrayList<>();
@@ -336,11 +375,16 @@ public class GitRepository implements AutoCloseable
             list.source(walk);
             list.fillTo(count);
             for (PlotCommit<PlotLane> commit : list)
+            {
+                // fillTo() may read a few more
+                if (result.size() >= count)
+                    break;
                 result.add(new CommitInfo(commit.name(),
                                           commit.getShortMessage(),
                                           commit.getAuthorIdent().getName(),
                                           Instant.ofEpochSecond(commit.getCommitTime()),
                                           commit));
+            }
         }
         return result;
     }
@@ -360,7 +404,7 @@ public class GitRepository implements AutoCloseable
     /** @param path File path relative to the work tree
      *  @return Unified diff of the staged change, from HEAD to the index
      */
-    public String getStagedDiff(final String path) throws Exception
+    public synchronized String getStagedDiff(final String path) throws Exception
     {
         final Repository repository = git.getRepository();
         try (ObjectReader reader = repository.newObjectReader())
@@ -373,7 +417,7 @@ public class GitRepository implements AutoCloseable
      *  @return Unified diff of the unstaged change, from the index to the work tree.
      *          For a conflict, from HEAD to the work tree file with conflict markers
      */
-    public String getUnstagedDiff(final String path) throws Exception
+    public synchronized String getUnstagedDiff(final String path) throws Exception
     {
         final Repository repository = git.getRepository();
         final DirCache index = repository.readDirCache();
@@ -413,10 +457,31 @@ public class GitRepository implements AutoCloseable
         return out.toString(StandardCharsets.UTF_8);
     }
 
+    /** @param paths Changed files, relative to the work tree
+     *  @return Unified diff of these files from HEAD to the work tree, i.e. all uncommitted changes
+     */
+    public synchronized String getUncommittedDiff(final Collection<String> paths) throws Exception
+    {
+        if (paths.isEmpty())
+            return "";
+        final Repository repository = git.getRepository();
+        final ByteArrayOutputStream out = new ByteArrayOutputStream();
+        try (ObjectReader reader = repository.newObjectReader();
+             DiffFormatter formatter = new DiffFormatter(out))
+        {
+            formatter.setRepository(repository);
+            // Limit to the changed files, the work tree may contain many ignored files
+            formatter.setPathFilter(PathFilterGroup.createFromStrings(paths));
+            formatter.format(getHeadTree(reader), new FileTreeIterator(repository));
+            formatter.flush();
+        }
+        return out.toString(StandardCharsets.UTF_8);
+    }
+
     /** @param id Full commit id
      *  @return Commit header and unified diff against its first parent
      */
-    public String getCommitDiff(final String id) throws Exception
+    public synchronized String getCommitDiff(final String id) throws Exception
     {
         final Repository repository = git.getRepository();
         final ByteArrayOutputStream out = new ByteArrayOutputStream();
@@ -444,7 +509,7 @@ public class GitRepository implements AutoCloseable
     /** Stage files, like 'git add' or 'git rm --cached' for deleted files
      *  @param paths File paths relative to the work tree
      */
-    public void stage(final Collection<String> paths) throws Exception
+    public synchronized void stage(final Collection<String> paths) throws Exception
     {
         final File work_tree = getWorkTree();
         AddCommand add = null;
@@ -463,7 +528,7 @@ public class GitRepository implements AutoCloseable
     /** Unstage files, like 'git reset -- paths'
      *  @param paths File paths relative to the work tree
      */
-    public void unstage(final Collection<String> paths) throws Exception
+    public synchronized void unstage(final Collection<String> paths) throws Exception
     {
         if (paths.isEmpty())
             return;
@@ -487,7 +552,7 @@ public class GitRepository implements AutoCloseable
     /** Discard unstaged changes: Restore tracked files from the index, delete untracked files
      *  @param paths File paths relative to the work tree
      */
-    public void discard(final Collection<String> paths) throws Exception
+    public synchronized void discard(final Collection<String> paths) throws Exception
     {
         final DirCache index = git.getRepository().readDirCache();
         final List<String> tracked = new ArrayList<>();
@@ -495,13 +560,32 @@ public class GitRepository implements AutoCloseable
             if (index.findEntry(path) >= 0)
                 tracked.add(path);
             else
-                Files.deleteIfExists(new File(getWorkTree(), path).toPath());
+                deleteUntracked(path);
         if (! tracked.isEmpty())
             git.checkout().addPaths(tracked).call();
     }
 
+    /** Delete untracked file, and parent directories that are then empty
+     *  @param path File path relative to the work tree
+     */
+    private void deleteUntracked(final String path) throws Exception
+    {
+        final File top = getWorkTree();
+        final File file = new File(top, path);
+        Files.deleteIfExists(file.toPath());
+        for (File parent = file.getParentFile();
+             parent != null  &&  ! parent.equals(top);
+             parent = parent.getParentFile())
+        {
+            final String[] content = parent.list();
+            if (content == null  ||  content.length > 0)
+                break;
+            Files.delete(parent.toPath());
+        }
+    }
+
     /** @return Full message of the HEAD commit, <code>null</code> if there is none */
-    public String getHeadMessage() throws Exception
+    public synchronized String getHeadMessage() throws Exception
     {
         final ObjectId head = git.getRepository().resolve(Constants.HEAD);
         if (head == null)
@@ -516,7 +600,7 @@ public class GitRepository implements AutoCloseable
      *  @param message Commit message
      *  @param amend Replace the last commit?
      */
-    public void commit(final String message, final boolean amend) throws Exception
+    public synchronized void commit(final String message, final boolean amend) throws Exception
     {
         final FileStatus status = getStatus();
         if (! amend  &&  status.staged().isEmpty()  &&  ! status.merging())
@@ -530,7 +614,7 @@ public class GitRepository implements AutoCloseable
      *  @return <code>true</code> if the merge stopped with conflicts that need to be resolved
      *  @throws Exception if the merge failed, for example because local changes would be overwritten
      */
-    public boolean merge(final String name, final boolean no_ff) throws Exception
+    public synchronized boolean merge(final String name, final boolean no_ff) throws Exception
     {
         final Ref ref = git.getRepository().findRef(name);
         if (ref == null)
@@ -547,11 +631,38 @@ public class GitRepository implements AutoCloseable
         return false;
     }
 
+    /** How {@link #reset} treats index and work tree */
+    public enum ResetMode
+    {
+        /** Keep index and work tree, only move the branch */
+        SOFT(ResetType.SOFT),
+        /** Reset the index, keep the work tree */
+        MIXED(ResetType.MIXED),
+        /** Reset index and work tree, discarding all changes */
+        HARD(ResetType.HARD);
+
+        private final ResetType type;
+
+        private ResetMode(final ResetType type)
+        {
+            this.type = type;
+        }
+    }
+
+    /** Reset the current branch to a commit, like 'git reset --soft|--mixed|--hard'
+     *  @param id Commit id
+     *  @param mode Reset mode
+     */
+    public synchronized void reset(final String id, final ResetMode mode) throws Exception
+    {
+        git.reset().setRef(id).setMode(mode.type).call();
+    }
+
     /** Abort a merge, cherry-pick or revert: Reset index and work tree to HEAD
      *
      *  <p>Like 'git merge --abort', discards all uncommitted changes.
      */
-    public void abortMerge() throws Exception
+    public synchronized void abortMerge() throws Exception
     {
         git.reset().setMode(ResetType.HARD).call();
     }
@@ -560,7 +671,7 @@ public class GitRepository implements AutoCloseable
      *  @param id Commit id
      *  @return <code>true</code> if it stopped with conflicts that need to be resolved
      */
-    public boolean cherryPick(final String id) throws Exception
+    public synchronized boolean cherryPick(final String id) throws Exception
     {
         final CherryPickResult result = git.cherryPick().include(ObjectId.fromString(id)).call();
         if (result.getStatus() == CherryPickResult.CherryPickStatus.CONFLICTING)
@@ -575,7 +686,7 @@ public class GitRepository implements AutoCloseable
      *  @param id Commit id
      *  @return <code>true</code> if it stopped with conflicts that need to be resolved
      */
-    public boolean revert(final String id) throws Exception
+    public synchronized boolean revert(final String id) throws Exception
     {
         final RevertCommand command = git.revert().include(ObjectId.fromString(id));
         if (command.call() != null)
@@ -590,7 +701,7 @@ public class GitRepository implements AutoCloseable
      *  @param message Message for an annotated tag, empty for a lightweight tag
      *  @param commit Commit to tag, <code>null</code> for HEAD
      */
-    public void createTag(final String name, final String message, final String commit) throws Exception
+    public synchronized void createTag(final String name, final String message, final String commit) throws Exception
     {
         try (RevWalk walk = new RevWalk(git.getRepository()))
         {
@@ -609,13 +720,13 @@ public class GitRepository implements AutoCloseable
     }
 
     /** @param name Local tag to delete */
-    public void deleteTag(final String name) throws Exception
+    public synchronized void deleteTag(final String name) throws Exception
     {
         git.tagDelete().setTags(name).call();
     }
 
     /** @param branch Local branch to check out */
-    public void checkout(final String branch) throws Exception
+    public synchronized void checkout(final String branch) throws Exception
     {
         git.checkout().setName(branch).call();
     }
@@ -624,7 +735,7 @@ public class GitRepository implements AutoCloseable
      *  @param remote_branch Remote branch
      *  @param name Name of the new local branch
      */
-    public void checkoutRemote(final RemoteBranch remote_branch, final String name) throws Exception
+    public synchronized void checkoutRemote(final RemoteBranch remote_branch, final String name) throws Exception
     {
         git.checkout()
            .setCreateBranch(true)
@@ -638,7 +749,7 @@ public class GitRepository implements AutoCloseable
      *  @param start_point Commit id, branch or tag where the branch starts, <code>null</code> for HEAD
      *  @param checkout Check out the new branch?
      */
-    public void createBranch(final String name, final String start_point, final boolean checkout) throws Exception
+    public synchronized void createBranch(final String name, final String start_point, final boolean checkout) throws Exception
     {
         if (checkout)
         {
@@ -660,7 +771,7 @@ public class GitRepository implements AutoCloseable
      *  @param force Delete even if not merged?
      *  @throws org.eclipse.jgit.api.errors.NotMergedException if not merged and not forced
      */
-    public void deleteBranch(final String name, final boolean force) throws Exception
+    public synchronized void deleteBranch(final String name, final boolean force) throws Exception
     {
         git.branchDelete().setBranchNames(Constants.R_HEADS + name).setForce(force).call();
     }
@@ -668,7 +779,7 @@ public class GitRepository implements AutoCloseable
     /** @param id Stash commit id
      *  @return Diff of the stashed changes, including untracked files
      */
-    public String getStashDiff(final String id) throws Exception
+    public synchronized String getStashDiff(final String id) throws Exception
     {
         final StringBuilder result = new StringBuilder(getCommitDiff(id));
         // Untracked files are stored in a third parent commit
@@ -692,7 +803,7 @@ public class GitRepository implements AutoCloseable
      *  @param message Stash message, <code>null</code> for default
      *  @param include_untracked Also stash untracked files?
      */
-    public void stash(final String message, final boolean include_untracked) throws Exception
+    public synchronized void stash(final String message, final boolean include_untracked) throws Exception
     {
         final var command = git.stashCreate().setIncludeUntracked(include_untracked);
         if (message != null  &&  ! message.isBlank())
@@ -704,7 +815,7 @@ public class GitRepository implements AutoCloseable
     /** @param index Stash index
      *  @param drop Drop the stash after applying it ('pop')?
      */
-    public void applyStash(final int index, final boolean drop) throws Exception
+    public synchronized void applyStash(final int index, final boolean drop) throws Exception
     {
         git.stashApply().setStashRef(Constants.STASH + "@{" + index + "}").setRestoreUntracked(true).call();
         if (drop)
@@ -712,7 +823,7 @@ public class GitRepository implements AutoCloseable
     }
 
     /** @param index Stash index to delete */
-    public void dropStash(final int index) throws Exception
+    public synchronized void dropStash(final int index) throws Exception
     {
         git.stashDrop().setStashRef(index).call();
     }
@@ -736,7 +847,7 @@ public class GitRepository implements AutoCloseable
     /** Fetch from all remotes, removing branches deleted on the remote
      *  @param credentials Credentials provider
      */
-    public void fetch(final CredentialsProvider credentials) throws Exception
+    public synchronized void fetch(final CredentialsProvider credentials) throws Exception
     {
         for (String remote : git.getRepository().getRemoteNames())
         {
@@ -749,7 +860,7 @@ public class GitRepository implements AutoCloseable
     /** Pull from the configured upstream
      *  @param credentials Credentials provider
      */
-    public void pull(final CredentialsProvider credentials) throws Exception
+    public synchronized void pull(final CredentialsProvider credentials) throws Exception
     {
         final var command = git.pull();
         configure(command, credentials);
@@ -761,7 +872,7 @@ public class GitRepository implements AutoCloseable
     /** Push the current branch to the configured remote
      *  @param credentials Credentials provider
      */
-    public void push(final CredentialsProvider credentials) throws Exception
+    public synchronized void push(final CredentialsProvider credentials) throws Exception
     {
         final var command = git.push();
         configure(command, credentials);
@@ -772,18 +883,34 @@ public class GitRepository implements AutoCloseable
      *  @param name Tag name
      *  @param credentials Credentials provider
      */
-    public void pushTag(final String name, final CredentialsProvider credentials) throws Exception
+    public synchronized void pushTag(final String name, final CredentialsProvider credentials) throws Exception
+    {
+        final String ref = Constants.R_TAGS + name;
+        final var command = git.push().setRemote(getDefaultRemote()).setRefSpecs(new RefSpec(ref + ":" + ref));
+        configure(command, credentials);
+        checkPushResults(command.call());
+    }
+
+    /** Delete a tag on the remote, the local tag is kept
+     *  @param name Tag name
+     *  @param credentials Credentials provider
+     */
+    public synchronized void deleteRemoteTag(final String name, final CredentialsProvider credentials) throws Exception
+    {
+        final var command = git.push().setRemote(getDefaultRemote()).setRefSpecs(new RefSpec(":" + Constants.R_TAGS + name));
+        configure(command, credentials);
+        checkPushResults(command.call());
+    }
+
+    /** @return "origin", or the first remote if there is no "origin" */
+    private String getDefaultRemote() throws Exception
     {
         final Set<String> remotes = git.getRepository().getRemoteNames();
         if (remotes.isEmpty())
             throw new Exception("No remote configured");
-        final String remote = remotes.contains(Constants.DEFAULT_REMOTE_NAME)
-                            ? Constants.DEFAULT_REMOTE_NAME
-                            : remotes.iterator().next();
-        final String ref = Constants.R_TAGS + name;
-        final var command = git.push().setRemote(remote).setRefSpecs(new RefSpec(ref + ":" + ref));
-        configure(command, credentials);
-        checkPushResults(command.call());
+        return remotes.contains(Constants.DEFAULT_REMOTE_NAME)
+             ? Constants.DEFAULT_REMOTE_NAME
+             : remotes.stream().sorted().findFirst().get();
     }
 
     /** Push does not throw when the remote rejects an update, check each one */
@@ -805,7 +932,7 @@ public class GitRepository implements AutoCloseable
     }
 
     @Override
-    public void close()
+    public synchronized void close()
     {
         git.close();
     }

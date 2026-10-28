@@ -71,10 +71,19 @@ class CommitGraphCell extends TableCell<CommitInfo, CommitInfo>
     protected void updateItem(final CommitInfo commit, final boolean empty)
     {
         super.updateItem(commit, empty);
+        setStyle(null);
         if (empty  ||  commit == null)
         {
             setText(null);
             setGraphic(null);
+            return;
+        }
+        if (commit.plot() == null)
+        {
+            // 'Uncommitted changes' row: No graph, aligned with the messages
+            setGraphic(null);
+            setText(commit.message());
+            setStyle("-fx-font-style: italic; -fx-padding: 0 0 0 " + graph_width.getAsInt() + ";");
             return;
         }
         final double height = getTableView().getFixedCellSize() > 0 ? getTableView().getFixedCellSize() : 24;

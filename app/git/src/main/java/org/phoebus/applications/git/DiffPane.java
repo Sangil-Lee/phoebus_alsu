@@ -134,7 +134,7 @@ class DiffPane extends BorderPane
     private static class SideBySideCell extends ListCell<Row>
     {
         private static final String FONT = "-fx-font-family: monospace;";
-        private static final String NUMBER = FONT + "-fx-text-fill: gray; -fx-alignment: center-right; -fx-padding: 0 4 0 0;";
+        private static final String NUMBER = FONT + "-fx-text-fill: gray; -fx-alignment: top-right; -fx-padding: 0 4 0 0;";
 
         private final Label left_number = new Label(), left = new Label(),
                             right_number = new Label(), right = new Label();
@@ -150,9 +150,11 @@ class DiffPane extends BorderPane
             for (Label text : List.of(left, right))
             {
                 text.setMaxWidth(Double.MAX_VALUE);
-                // Both sides get half of the width, long lines are clipped
+                // Both sides get half of the width, long lines wrap
                 text.prefWidthProperty().bind(widthProperty().subtract(110).divide(2));
                 text.setMinWidth(0);
+                text.setWrapText(true);
+                text.setAlignment(Pos.TOP_LEFT);
                 HBox.setHgrow(text, Priority.ALWAYS);
             }
             setPadding(Insets.EMPTY);
