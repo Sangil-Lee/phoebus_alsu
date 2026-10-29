@@ -37,11 +37,13 @@ import org.eclipse.jgit.api.RmCommand;
 import org.eclipse.jgit.api.Status;
 import org.eclipse.jgit.api.TransportCommand;
 import org.eclipse.jgit.blame.BlameResult;
+import org.eclipse.jgit.diff.ContentSource;
 import org.eclipse.jgit.diff.DiffConfig;
 import org.eclipse.jgit.diff.DiffEntry;
 import org.eclipse.jgit.diff.DiffFormatter;
 import org.eclipse.jgit.diff.RawText;
 import org.eclipse.jgit.diff.RawTextComparator;
+import org.eclipse.jgit.diff.RenameDetector;
 import org.eclipse.jgit.dircache.DirCache;
 import org.eclipse.jgit.dircache.DirCacheEditor;
 import org.eclipse.jgit.dircache.DirCacheEntry;
@@ -49,6 +51,7 @@ import org.eclipse.jgit.dircache.DirCacheIterator;
 import org.eclipse.jgit.lib.BranchTrackingStatus;
 import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.FileMode;
+import org.eclipse.jgit.lib.NullProgressMonitor;
 import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.lib.ObjectInserter;
 import org.eclipse.jgit.lib.ObjectReader;
@@ -669,6 +672,7 @@ public class GitRepository implements AutoCloseable
                              : null;
         formatter.setRepository(git.getRepository());
         formatter.setDetectRenames(true);
+        formatter.getRenameDetector().setRenameScore(RENAME_SCORE);
         return formatter.scan(parent, commit.getTree());
     }
 
@@ -682,14 +686,7 @@ public class GitRepository implements AutoCloseable
              DiffFormatter formatter = createFormatter(DisabledOutputStream.INSTANCE))
         {
             for (DiffEntry entry : scanCommit(walk, formatter, id))
-                result.add(switch (entry.getChangeType())
-                {
-                    case ADD    -> new CommitFile(ChangeType.ADDED, entry.getNewPath(), null);
-                    case COPY   -> new CommitFile(ChangeType.ADDED, entry.getNewPath(), null);
-                    case DELETE -> new CommitFile(ChangeType.DELETED, entry.getOldPath(), null);
-                    case RENAME -> new CommitFile(ChangeType.RENAMED, entry.getNewPath(), entry.getOldPath());
-                    default     -> new CommitFile(ChangeType.MODIFIED, entry.getNewPath(), null);
-                });
+                result.add(toCommitFile(entry));
         }
         result.sort(Comparator.comparing(CommitFile::path));
         return result;
@@ -853,6 +850,7 @@ public class GitRepository implements AutoCloseable
                                  : null;
             formatter.setRepository(repository);
             formatter.setDetectRenames(true);
+            formatter.getRenameDetector().setRenameScore(RENAME_SCORE);
             formatter.format(parent, commit.getTree());
             formatter.flush();
         }
@@ -941,6 +939,9 @@ public class GitRepository implements AutoCloseable
     public record Versions(byte[] old_content, byte[] new_content) {}
 
     private static final byte[] NO_CONTENT = new byte[0];
+
+    /** Similarity in percent for detecting renames, same as the 'git' command (JGit uses 60) */
+    private static final int RENAME_SCORE = 50;
 
     /** @param tree Tree, <code>null</code> for none
      *  @param path File path
@@ -1031,6 +1032,284 @@ public class GitRepository implements AutoCloseable
                     break;
                 }
             return new Versions(getContent(parent, old_path), getContent(commit.getTree(), new_path));
+        }
+    }
+
+    /** @param ref Branch, remote branch, tag, commit id or expression like 'HEAD~2'
+     *  @return Commit
+     *  @throws Exception if the ref is unknown
+     */
+    public synchronized Revision.Commit resolve(final String ref) throws Exception
+    {
+        final ObjectId id = git.getRepository().resolve(ref + "^{commit}");
+        if (id == null)
+            throw new Exception(Messages.UnknownRevision + ": " + ref);
+        final String label = ref.matches("[0-9a-fA-F]{8,40}") ? ref.substring(0, 7) : ref;
+        return new Revision.Commit(id.name(), label);
+    }
+
+    /** @param revision Revision
+     *  @param reader Reader for commits
+     *  @param walk Walk for parsing commits
+     *  @return Tree iterator for that revision
+     */
+    private AbstractTreeIterator getTree(final Revision revision, final ObjectReader reader, final RevWalk walk) throws Exception
+    {
+        final Repository repository = git.getRepository();
+        if (revision instanceof Revision.WorkTree)
+            return new FileTreeIterator(repository);
+        if (revision instanceof Revision.Index)
+            return new DirCacheIterator(repository.readDirCache());
+        if (revision instanceof Revision.Commit commit)
+        {
+            final CanonicalTreeParser parser = new CanonicalTreeParser();
+            parser.reset(reader, walk.parseCommit(ObjectId.fromString(commit.id())).getTree());
+            return parser;
+        }
+        throw new IllegalArgumentException("Cannot compare " + revision);
+    }
+
+    /** @param entry Difference
+     *  @return Changed file
+     */
+    private static CommitFile toCommitFile(final DiffEntry entry)
+    {
+        return switch (entry.getChangeType())
+        {
+            case ADD    -> new CommitFile(ChangeType.ADDED, entry.getNewPath(), null);
+            case COPY   -> new CommitFile(ChangeType.ADDED, entry.getNewPath(), null);
+            case DELETE -> new CommitFile(ChangeType.DELETED, entry.getOldPath(), null);
+            case RENAME -> new CommitFile(ChangeType.RENAMED, entry.getNewPath(), entry.getOldPath());
+            default     -> new CommitFile(ChangeType.MODIFIED, entry.getNewPath(), null);
+        };
+    }
+
+    /** Compare two revisions, ignoring untracked files of the work tree
+     *  @param a Old side
+     *  @param b New side
+     *  @param paths Paths to compare, <code>null</code> for all
+     *  @param formatter Formatter to use
+     *  @return Differences
+     */
+    private List<DiffEntry> scan(final Revision a, final Revision b, final Collection<String> paths,
+                                 final DiffFormatter formatter) throws Exception
+    {
+        final Repository repository = git.getRepository();
+        try (ObjectReader reader = repository.newObjectReader();
+             RevWalk walk = new RevWalk(reader))
+        {
+            formatter.setRepository(repository);
+            if (paths != null)
+                formatter.setPathFilter(PathFilterGroup.createFromStrings(paths));
+            final AbstractTreeIterator old_tree = getTree(a, reader, walk);
+            final AbstractTreeIterator new_tree = getTree(b, reader, walk);
+            final List<DiffEntry> entries = formatter.scan(old_tree, new_tree);
+            final DirCache index = a instanceof Revision.WorkTree  ||  b instanceof Revision.WorkTree
+                                 ? repository.readDirCache()
+                                 : null;
+            final List<DiffEntry> tracked = new ArrayList<>();
+            for (DiffEntry entry : entries)
+            {
+                // Untracked files in the work tree are not part of a version
+                if (index != null)
+                {
+                    if (b instanceof Revision.WorkTree  &&  entry.getChangeType() == DiffEntry.ChangeType.ADD  &&
+                        index.findEntry(entry.getNewPath()) < 0)
+                        continue;
+                    if (a instanceof Revision.WorkTree  &&  entry.getChangeType() == DiffEntry.ChangeType.DELETE  &&
+                        index.findEntry(entry.getOldPath()) < 0)
+                        continue;
+                }
+                tracked.add(entry);
+            }
+            // Detect renames after removing untracked files,
+            // reading work tree files from the work tree
+            final RenameDetector renames = new RenameDetector(repository);
+            renames.setRenameScore(RENAME_SCORE);
+            renames.addAll(tracked);
+            return renames.compute(new ContentSource.Pair(getSource(a, reader), getSource(b, reader)),
+                                   NullProgressMonitor.INSTANCE);
+        }
+    }
+
+    /** @param revision Revision
+     *  @param reader Reader for objects
+     *  @return Source of file content for that revision
+     */
+    private ContentSource getSource(final Revision revision, final ObjectReader reader)
+    {
+        if (revision instanceof Revision.WorkTree)
+            return ContentSource.create(new FileTreeIterator(git.getRepository()));
+        return ContentSource.create(reader);
+    }
+
+    /** @param a Old side
+     *  @param b New side
+     *  @param paths Files or directories to compare, <code>null</code> for all
+     *  @return Files that differ between the revisions, with renames.
+     *          Untracked files of the work tree are ignored
+     */
+    public synchronized List<CommitFile> compare(final Revision a, final Revision b, final Collection<String> paths) throws Exception
+    {
+        final List<CommitFile> result = new ArrayList<>();
+        try (DiffFormatter formatter = createFormatter(DisabledOutputStream.INSTANCE))
+        {
+            for (DiffEntry entry : scan(a, b, paths, formatter))
+                result.add(toCommitFile(entry));
+        }
+        result.sort(Comparator.comparing(CommitFile::path));
+        return result;
+    }
+
+    /** @param a Old side
+     *  @param b New side
+     *  @param paths Files or directories to compare, including the old path of renamed files, <code>null</code> for all
+     *  @return Unified diff
+     */
+    public synchronized String getDiff(final Revision a, final Revision b, final Collection<String> paths) throws Exception
+    {
+        final ByteArrayOutputStream out = new ByteArrayOutputStream();
+        try (DiffFormatter formatter = createFormatter(out))
+        {
+            for (DiffEntry entry : scan(a, b, paths, formatter))
+                formatter.format(entry);
+            formatter.flush();
+        }
+        return out.toString(StandardCharsets.UTF_8);
+    }
+
+    /** @param revision Revision
+     *  @param path File path
+     *  @return Content, <code>null</code> if the file does not exist in that revision
+     */
+    private byte[] findContent(final Revision revision, final String path) throws Exception
+    {
+        final Repository repository = git.getRepository();
+        if (revision instanceof Revision.WorkTree)
+        {
+            final Path file = new File(getWorkTree(), path).toPath();
+            return Files.isRegularFile(file) ? Files.readAllBytes(file) : null;
+        }
+        if (revision instanceof Revision.Commit commit)
+        {
+            try (RevWalk walk = new RevWalk(repository);
+                 TreeWalk tree = TreeWalk.forPath(repository, path, walk.parseCommit(ObjectId.fromString(commit.id())).getTree()))
+            {
+                if (tree == null  ||  (tree.getFileMode(0).getBits() & FileMode.TYPE_MASK) != FileMode.TYPE_FILE)
+                    return null;
+                return repository.open(tree.getObjectId(0), Constants.OBJ_BLOB).getBytes();
+            }
+        }
+        final int stage = revision instanceof Revision.Stage s ? s.stage() : DirCacheEntry.STAGE_0;
+        final DirCache index = repository.readDirCache();
+        for (int i = index.findEntry(path);
+             i >= 0  &&  i < index.getEntryCount()  &&  index.getEntry(i).getPathString().equals(path);
+             ++i)
+            if (index.getEntry(i).getStage() == stage)
+                return getContent(index.getEntry(i));
+        return null;
+    }
+
+    /** @param revision Revision
+     *  @param path File path
+     *  @return Content of the file, empty if it does not exist in that revision
+     */
+    public synchronized byte[] getContent(final Revision revision, final String path) throws Exception
+    {
+        final byte[] content = findContent(revision, path);
+        return content == null ? NO_CONTENT : content;
+    }
+
+    /** @param revision Revision
+     *  @param path File path
+     *  @return Does the file exist in that revision?
+     */
+    public synchronized boolean exists(final Revision revision, final String path) throws Exception
+    {
+        return findContent(revision, path) != null;
+    }
+
+    /** @param a Old side
+     *  @param b New side
+     *  @param file File, with old path if renamed
+     *  @return Content of the file in both revisions
+     */
+    public synchronized Versions getVersions(final Revision a, final Revision b, final CommitFile file) throws Exception
+    {
+        return new Versions(getContent(a, file.old_path() == null ? file.path() : file.old_path()),
+                            getContent(b, file.path()));
+    }
+
+    /** Replace a file with its content in another revision
+     *
+     *  <p>If the file does not exist in that revision, it is deleted.
+     *
+     *  @param revision Commit or index
+     *  @param source Path of the file in that revision, differs from the path after a rename
+     *  @param path File path
+     *  @param index_too Also update the index, otherwise only the work tree
+     */
+    public synchronized void restore(final Revision revision, final String source, final String path, final boolean index_too) throws Exception
+    {
+        final byte[] content = findContent(revision, source);
+        final File file = new File(getWorkTree(), path);
+        if (! source.equals(path))
+        {
+            // Older version of a renamed file: Write content to current path
+            file.getParentFile().mkdirs();
+            Files.write(file.toPath(), content == null ? NO_CONTENT : content);
+            if (index_too)
+                git.add().addFilepattern(path).call();
+            return;
+        }
+        if (index_too  &&  revision instanceof Revision.Commit commit)
+        {
+            if (content == null)
+            {
+                if (git.getRepository().readDirCache().findEntry(path) >= 0)
+                    git.rm().setCached(true).addFilepattern(path).call();
+                Files.deleteIfExists(file.toPath());
+            }
+            else
+                git.checkout().setStartPoint(commit.id()).addPath(path).call();
+            return;
+        }
+        if (content == null)
+            Files.deleteIfExists(file.toPath());
+        else
+        {
+            file.getParentFile().mkdirs();
+            Files.write(file.toPath(), content);
+        }
+    }
+
+    /** Write the files of a commit's directory to another location
+     *
+     *  <p>Used to open an old version of a display
+     *  with the files that it references by relative path.
+     *
+     *  @param commit Commit
+     *  @param directory Directory in the repository, empty for the top
+     *  @param target Where to write the files, using their path in the repository
+     */
+    public synchronized void export(final Revision.Commit commit, final String directory, final File target) throws Exception
+    {
+        final Repository repository = git.getRepository();
+        try (RevWalk walk = new RevWalk(repository);
+             TreeWalk tree = new TreeWalk(repository))
+        {
+            tree.addTree(walk.parseCommit(ObjectId.fromString(commit.id())).getTree());
+            tree.setRecursive(true);
+            if (! directory.isEmpty())
+                tree.setFilter(PathFilter.create(directory));
+            while (tree.next())
+            {
+                if ((tree.getFileMode(0).getBits() & FileMode.TYPE_MASK) != FileMode.TYPE_FILE)
+                    continue;
+                final File file = new File(target, tree.getPathString());
+                file.getParentFile().mkdirs();
+                Files.write(file.toPath(), repository.open(tree.getObjectId(0), Constants.OBJ_BLOB).getBytes());
+            }
         }
     }
 

@@ -3,6 +3,7 @@ package org.phoebus.applications.git;
 import java.io.File;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.function.Consumer;
@@ -19,7 +20,10 @@ import javafx.geometry.Insets;
 import javafx.geometry.Orientation;
 import javafx.geometry.Pos;
 import javafx.scene.control.Button;
+import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Label;
+import javafx.scene.control.MenuItem;
+import javafx.scene.control.SelectionMode;
 import javafx.scene.control.SplitPane;
 import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableRow;
@@ -70,16 +74,17 @@ class FileHistoryView
      */
     FileHistoryView(final Supplier<GitRepository> repo, final String path, final Consumer<Exception> on_error)
     {
-        this(repo, path, on_error, null);
+        this(repo, path, on_error, null, null);
     }
 
     /** @param repo Provides the repository
      *  @param path File path relative to the work tree
      *  @param on_error Error handler
      *  @param owned Repository that this view owns and closes when the tab is closed, or <code>null</code>
+     *  @param actions Compare, restore, ... or <code>null</code> to run them without refreshing a Git view
      */
     FileHistoryView(final Supplier<GitRepository> repo, final String path, final Consumer<Exception> on_error,
-                    final GitRepository owned)
+                    final GitRepository owned, final GitActions actions)
     {
         this.repo = repo;
         this.path = path;
@@ -100,6 +105,8 @@ class FileHistoryView
                           ? git -> git.getCommitFileVersions(version.commit().id(), version.path())
                           : null);
         });
+        history.getSelectionModel().setSelectionMode(SelectionMode.MULTIPLE);
+        history.setContextMenu(createContextMenu(actions != null ? actions : new GitActions(repo, layout, null)));
         history_pane = new SplitPane(history, diff);
         history_pane.setOrientation(Orientation.VERTICAL);
         history_pane.setDividerPositions(0.4);
@@ -139,6 +146,67 @@ class FileHistoryView
             tab.addClosedNotification(owned::close);
 
         load();
+    }
+
+    /** @param actions Actions
+     *  @return Menu to compare, restore, open versions
+     */
+    private ContextMenu createContextMenu(final GitActions actions)
+    {
+        final MenuItem compare = new MenuItem(Messages.CompareWithWorkTree);
+        compare.setOnAction(event ->
+        {
+            final FileVersion version = history.getSelectionModel().getSelectedItem();
+            actions.compare(toRevision(version), Revision.WORK_TREE, getPaths(List.of(version)));
+        });
+        final MenuItem compare_two = new MenuItem(Messages.CompareVersions);
+        compare_two.setOnAction(event ->
+        {
+            // Newest first, compare older with newer
+            final List<FileVersion> selected = new ArrayList<>(history.getSelectionModel().getSelectedItems());
+            selected.sort((a, b) -> Integer.compare(history.getItems().indexOf(b), history.getItems().indexOf(a)));
+            actions.compare(toRevision(selected.get(0)), toRevision(selected.get(1)), getPaths(selected));
+        });
+        final MenuItem restore = new MenuItem(Messages.RestoreThisVersion);
+        restore.setOnAction(event ->
+        {
+            final FileVersion version = history.getSelectionModel().getSelectedItem();
+            actions.restore(List.of(path), version.path(), toRevision(version));
+        });
+        final MenuItem open = new MenuItem(Messages.OpenThisVersion);
+        open.setOnAction(event ->
+        {
+            final FileVersion version = history.getSelectionModel().getSelectedItem();
+            actions.openVersion(version.path(), toRevision(version));
+        });
+        final ContextMenu menu = new ContextMenu(compare, compare_two, restore, open);
+        menu.setOnShowing(event ->
+        {
+            final int count = history.getSelectionModel().getSelectedItems().size();
+            compare.setDisable(count != 1);
+            restore.setDisable(count != 1);
+            open.setDisable(count != 1);
+            compare_two.setDisable(count != 2);
+        });
+        return menu;
+    }
+
+    private static Revision.Commit toRevision(final FileVersion version)
+    {
+        return new Revision.Commit(version.commit().id(), version.commit().id().substring(0, 7));
+    }
+
+    /** @param versions Versions
+     *  @return Current path and paths of the file in those versions
+     */
+    private List<String> getPaths(final List<FileVersion> versions)
+    {
+        final List<String> paths = new ArrayList<>();
+        paths.add(path);
+        for (FileVersion version : versions)
+            if (! paths.contains(version.path()))
+                paths.add(version.path());
+        return paths;
     }
 
     private void configureBlame()

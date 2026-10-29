@@ -19,6 +19,7 @@ import javafx.scene.control.Button;
 import javafx.scene.control.CheckBox;
 import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Label;
+import javafx.scene.control.Menu;
 import javafx.scene.control.MenuItem;
 import javafx.scene.control.SeparatorMenuItem;
 import javafx.scene.input.MouseButton;
@@ -87,6 +88,7 @@ class FileStatusPane extends BorderPane
     }
 
     private final Actions actions;
+    private final GitActions git_actions;
     private final TableView<FileRow> staged = new TableView<>();
     private final TableView<FileRow> unstaged = new TableView<>();
     private final DiffPane diff;
@@ -114,9 +116,11 @@ class FileStatusPane extends BorderPane
      *  @param on_error Error handler
      *  @param actions Actions
      */
-    FileStatusPane(final Supplier<GitRepository> repo, final Consumer<Exception> on_error, final Actions actions)
+    FileStatusPane(final Supplier<GitRepository> repo, final Consumer<Exception> on_error, final Actions actions,
+                   final GitActions git_actions)
     {
         this.actions = actions;
+        this.git_actions = git_actions;
         diff = new DiffPane(repo, on_error);
 
         configureTable(staged, true);
@@ -273,20 +277,30 @@ class FileStatusPane extends BorderPane
         ignore.setOnAction(event -> actions.ignore(table.getSelectionModel().getSelectedItem().entry.path()));
         final MenuItem history = new MenuItem(Messages.FileHistory);
         history.setOnAction(event -> actions.showFileHistory(table.getSelectionModel().getSelectedItem().entry.path()));
+        // Conflict: Merge tool
+        final MenuItem merge_tool = new MenuItem(Messages.MergeToolMenu);
+        merge_tool.setOnAction(event -> git_actions.openMergeTool(table.getSelectionModel().getSelectedItem().entry.path()));
+        // Compare with or replace with other version
+        final Menu compare = git_actions.createCompareMenu(() -> getPaths(table.getSelectionModel().getSelectedItems()));
+        final Menu restore = git_actions.createRestoreMenu(() -> getPaths(table.getSelectionModel().getSelectedItems()));
         // Open file, displays also in editor
         final MenuItem open = new MenuItem(Messages.Open);
         open.setOnAction(event -> actions.openFile(table.getSelectionModel().getSelectedItem().entry.path(), false));
         final MenuItem edit = new MenuItem(Messages.OpenInEditor);
         edit.setOnAction(event -> actions.openFile(table.getSelectionModel().getSelectedItem().entry.path(), true));
         menu.getItems().addAll(0, List.of(open, edit, new SeparatorMenuItem()));
-        menu.getItems().addAll(ours, theirs, ignore, history);
+        menu.getItems().addAll(merge_tool, ours, theirs, ignore, history, new SeparatorMenuItem(), compare, restore);
         // Double-click opens the file
         table.setOnMouseClicked(event ->
         {
             final FileRow row = table.getSelectionModel().getSelectedItem();
-            if (event.getButton() == MouseButton.PRIMARY  &&  event.getClickCount() == 2  &&
-                row != null  &&  row.entry.type() != ChangeType.DELETED)
-                actions.openFile(row.entry.path(), false);
+            if (event.getButton() == MouseButton.PRIMARY  &&  event.getClickCount() == 2  &&  row != null)
+            {
+                if (row.entry.type() == ChangeType.CONFLICT)
+                    git_actions.openMergeTool(row.entry.path());
+                else if (row.entry.type() != ChangeType.DELETED)
+                    actions.openFile(row.entry.path(), false);
+            }
         });
         menu.setOnShowing(event ->
         {
@@ -296,6 +310,12 @@ class FileStatusPane extends BorderPane
             final boolean conflicts = ! none  &&  selected.stream().allMatch(row -> row.entry.type() == ChangeType.CONFLICT);
             ours.setVisible(conflicts);
             theirs.setVisible(conflicts);
+            merge_tool.setVisible(conflicts  &&  selected.size() == 1);
+            // Untracked files have no other version
+            final boolean tracked = ! none  &&  selected.stream().noneMatch(row -> row.entry.type() == ChangeType.UNTRACKED  ||
+                                                                                   row.entry.type() == ChangeType.CONFLICT);
+            compare.setDisable(! tracked);
+            restore.setDisable(! tracked);
             ignore.setVisible(selected.size() == 1  &&  selected.get(0).entry.type() == ChangeType.UNTRACKED);
             final boolean single_file = selected.size() == 1  &&  selected.get(0).entry.type() != ChangeType.DELETED;
             open.setDisable(! single_file);

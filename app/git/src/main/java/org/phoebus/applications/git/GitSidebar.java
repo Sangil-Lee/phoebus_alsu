@@ -54,6 +54,8 @@ class GitSidebar extends TreeView<Object>
         void editRemote(String name, String url);
         /** Remove a remote, after asking user */
         void removeRemote(String name);
+        /** @param ref Branch or tag to compare with the current branch */
+        void compareWithCurrent(String ref);
     }
 
     /** Section header */
@@ -298,7 +300,9 @@ class GitSidebar extends TreeView<Object>
         delete.setOnAction(event -> actions.deleteTag(tag));
         final MenuItem delete_remote = new MenuItem(Messages.DeleteRemoteTag);
         delete_remote.setOnAction(event -> actions.deleteRemoteTag(tag));
-        return new ContextMenu(create, push, delete, delete_remote);
+        final MenuItem compare = new MenuItem(Messages.CompareWithCurrent);
+        compare.setOnAction(event -> actions.compareWithCurrent(tag.name()));
+        return new ContextMenu(create, compare, push, delete, delete_remote);
     }
 
     private ContextMenu createMenu(final BranchInfo branch)
@@ -319,7 +323,10 @@ class GitSidebar extends TreeView<Object>
         final MenuItem delete = new MenuItem(Messages.DeleteBranch);
         delete.setDisable(branch.current());
         delete.setOnAction(event -> actions.deleteBranch(branch));
-        return new ContextMenu(checkout, create, merge, rebase, rename, delete);
+        final MenuItem compare = new MenuItem(Messages.CompareWithCurrent);
+        compare.setDisable(branch.current());
+        compare.setOnAction(event -> actions.compareWithCurrent(branch.name()));
+        return new ContextMenu(checkout, create, merge, rebase, compare, rename, delete);
     }
 
     private ContextMenu createMenu(final RemoteBranch branch)
@@ -332,7 +339,9 @@ class GitSidebar extends TreeView<Object>
         merge.setOnAction(event -> actions.merge(branch.fullName()));
         final MenuItem rebase = new MenuItem(Messages.RebaseOnto);
         rebase.setOnAction(event -> actions.rebaseOnto(branch.fullName()));
-        return new ContextMenu(checkout, create, merge, rebase);
+        final MenuItem compare = new MenuItem(Messages.CompareWithCurrent);
+        compare.setOnAction(event -> actions.compareWithCurrent(branch.fullName()));
+        return new ContextMenu(checkout, create, merge, rebase, compare);
     }
 
     private ContextMenu createMenu(final StashInfo stash)

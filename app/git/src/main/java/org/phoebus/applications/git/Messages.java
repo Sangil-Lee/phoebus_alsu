@@ -54,6 +54,13 @@ public class Messages
     public static String CommitCheckInfo;
     public static String CommitMessagePrompt;
     public static String Commits;
+    public static String Compare;
+    public static String CompareVersions;
+    public static String CompareWith;
+    public static String CompareWithCurrent;
+    public static String CompareWithOther;
+    public static String CompareWithWorkTree;
+    public static String ConflictStatus;
     public static String ConflictsInfo;
     public static String ContinueRebase;
     public static String CopyId;
@@ -76,6 +83,8 @@ public class Messages
     public static String DisplayProperties;
     public static String DropStash;
     public static String DropStashConfirm;
+    public static String EditConflict;
+    public static String EditConflictInfo;
     public static String EditRemote;
     public static String Error;
     public static String ErrorTitle;
@@ -85,6 +94,7 @@ public class Messages
     public static String ForcePush;
     public static String ForcePushInfo;
     public static String GitFileHistoryMenu;
+    public static String HEAD;
     public static String HeaderBranches;
     public static String HeaderRemotes;
     public static String HeaderStashes;
@@ -95,7 +105,9 @@ public class Messages
     public static String IgnoreInfo;
     public static String IgnorePattern;
     public static String IgnoreWhitespace;
+    public static String Index;
     public static String LoadMore;
+    public static String Loading;
     public static String LogMoreChanges;
     public static String LogOtherFiles;
     public static String LogPushedTo;
@@ -103,10 +115,20 @@ public class Messages
     public static String LogbookAfterPush;
     public static String MenuPath;
     public static String Merge;
+    public static String MergeBase;
+    public static String MergeBinary;
     public static String MergeBranch;
+    public static String MergeDeleted;
     public static String MergeInto;
     public static String MergeIntoCurrent;
+    public static String MergeOurs;
+    public static String MergeResult;
+    public static String MergeTheirs;
+    public static String MergeTool;
+    public static String MergeToolMenu;
     public static String NewRepository;
+    public static String NextConflict;
+    public static String NoConflicts;
     public static String NoFastForward;
     public static String NoOpenFiles;
     public static String NoRepository;
@@ -114,11 +136,14 @@ public class Messages
     public static String NoWidgetChanges;
     public static String NotCommitted;
     public static String NotInRepository;
+    public static String NotInRevision;
     public static String NotMerged;
     public static String Open;
     public static String OpenFiles;
     public static String OpenInEditor;
+    public static String OpenThisVersion;
     public static String PopStash;
+    public static String PreviousConflict;
     public static String Pull;
     public static String PullRebase;
     public static String Push;
@@ -134,6 +159,7 @@ public class Messages
     public static String RemoteUrl;
     public static String RemoveRemote;
     public static String RenameBranch;
+    public static String ReplaceWith;
     public static String Repository;
     public static String Reset;
     public static String ResetHard;
@@ -144,10 +170,20 @@ public class Messages
     public static String ResetTo;
     public static String ResolveOurs;
     public static String ResolveTheirs;
+    public static String RestoreConfirm;
+    public static String RestoreDirty;
+    public static String RestoreThisVersion;
+    public static String RestoreWorkTree;
+    public static String RestoreWorkTreeAndIndex;
     public static String Revert;
+    public static String Revision;
+    public static String SaveAndResolve;
     public static String SaveCredentials;
+    public static String SaveUnresolved;
     public static String Search;
     public static String SearchPrompt;
+    public static String SelectRevision;
+    public static String SelectRevisionInfo;
     public static String ShowInGitMenu;
     public static String SideBySide;
     public static String SkipRebase;
@@ -158,23 +194,28 @@ public class Messages
     public static String Stash;
     public static String StashMessage;
     public static String StashUntracked;
+    public static String Swap;
     public static String Tag;
     public static String TagMessage;
     public static String TagMessagePrompt;
     public static String TagName;
     public static String UncommittedChanges;
+    public static String UnknownRevision;
     public static String Unstage;
     public static String UnstageAll;
     public static String UnstageHunk;
     public static String UnstagedFiles;
     public static String Upstream;
     public static String UpstreamWillBeSet;
+    public static String UseOurs;
+    public static String UseOursThenTheirs;
+    public static String UseTheirs;
+    public static String UseTheirsThenOurs;
     public static String Warning;
     public static String WidgetAdded;
     public static String WidgetMode;
     public static String WidgetRemoved;
-    // ---
-    // --- Keep alphabetically sorted and 'in sync' with messages.properties!
+    public static String WorkTree;
     // ---
 
     static

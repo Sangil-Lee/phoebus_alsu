@@ -75,6 +75,7 @@ class HistoryPane extends BorderPane
         return commit != null  &&  UNCOMMITTED.equals(commit.id());
     }
 
+    private final GitActions git_actions;
     private final TableView<CommitInfo> history = new TableView<>();
     private final CheckBox all_branches = new CheckBox(Messages.AllBranches);
     private final CommitFilesPane details;
@@ -100,9 +101,10 @@ class HistoryPane extends BorderPane
      *  @param actions Actions
      */
     HistoryPane(final Supplier<GitRepository> repo, final Consumer<Exception> on_error,
-                final boolean all, final Actions actions)
+                final boolean all, final Actions actions, final GitActions git_actions)
     {
-        details = new CommitFilesPane(repo, on_error, actions::showFileHistory, actions::openFile);
+        this.git_actions = git_actions;
+        details = new CommitFilesPane(repo, on_error, actions::showFileHistory, actions::openFile, git_actions);
 
         final TableColumn<CommitInfo, CommitInfo> description = new TableColumn<>(Messages.ColDescription);
         description.setPrefWidth(600);
@@ -181,8 +183,17 @@ class HistoryPane extends BorderPane
             content.putString(getSelected().id());
             Clipboard.getSystemClipboard().setContent(content);
         });
+        final MenuItem compare_work = new MenuItem(Messages.CompareWithWorkTree);
+        compare_work.setOnAction(event -> git_actions.compare(toRevision(getSelected()), Revision.WORK_TREE, null));
+        final MenuItem compare_other = new MenuItem(Messages.CompareWithOther);
+        compare_other.setOnAction(event ->
+        {
+            final Revision.Commit selected = toRevision(getSelected());
+            git_actions.pickRevision(Messages.CompareWithOther, other -> git_actions.compare(other, selected, null));
+        });
         final ContextMenu menu = new ContextMenu(tag, branch, new SeparatorMenuItem(),
-                                                 cherry_pick, revert, reset, new SeparatorMenuItem(), logbook, copy);
+                                                 cherry_pick, revert, reset, new SeparatorMenuItem(),
+                                                 compare_work, compare_other, new SeparatorMenuItem(), logbook, copy);
         menu.setOnShowing(event ->
         {
             // Commit operations need an actual commit
@@ -191,6 +202,14 @@ class HistoryPane extends BorderPane
             menu.getItems().forEach(item -> item.setDisable(none));
         });
         return menu;
+    }
+
+    /** @param commit Commit
+     *  @return Revision for the commit
+     */
+    private static Revision.Commit toRevision(final CommitInfo commit)
+    {
+        return new Revision.Commit(commit.id(), commit.id().substring(0, 7));
     }
 
     private CommitInfo getSelected()

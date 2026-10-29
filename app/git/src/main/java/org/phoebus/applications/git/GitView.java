@@ -100,6 +100,9 @@ public class GitView implements AppInstance
     private final HistoryPane history;
     private final DiffPane stash_diff;
 
+    /** Compare, restore, merge tool */
+    private final GitActions git_actions;
+
     /** Currently open repository, accessed from UI thread and jobs */
     private volatile GitRepository repo;
 
@@ -154,8 +157,9 @@ public class GitView implements AppInstance
     {
         this.app = app;
 
-        file_status = new FileStatusPane(() -> repo, ex -> showError(Messages.Diff, ex), new FileStatusActions());
-        history = new HistoryPane(() -> repo, ex -> showError(Messages.Diff, ex), all_branches, new HistoryActions());
+        git_actions = new GitActions(() -> repo, layout, (name, operation) -> runAndRefresh(name, operation::run));
+        file_status = new FileStatusPane(() -> repo, ex -> showError(Messages.Diff, ex), new FileStatusActions(), git_actions);
+        history = new HistoryPane(() -> repo, ex -> showError(Messages.Diff, ex), all_branches, new HistoryActions(), git_actions);
         stash_diff = new DiffPane(() -> repo, ex -> showError(Messages.Diff, ex));
         sidebar = new GitSidebar(new SidebarActions());
 
@@ -672,7 +676,7 @@ public class GitView implements AppInstance
     /** @param path File to show in a new 'file history' tab */
     private void showFileHistory(final String path)
     {
-        new FileHistoryView(() -> repo, path, ex -> showError(Messages.FileHistory, ex));
+        new FileHistoryView(() -> repo, path, ex -> showError(Messages.FileHistory, ex), null, git_actions);
     }
 
     /** @param path File in the work tree
@@ -739,7 +743,7 @@ public class GitView implements AppInstance
         {
             final GitRepository owned = new GitRepository(file.isDirectory() ? file : file.getParentFile());
             new FileHistoryView(() -> owned, relative(owned.getWorkTree(), file),
-                                ex -> ExceptionDetailsErrorDialog.openError(Messages.FileHistory, ex), owned);
+                                ex -> ExceptionDetailsErrorDialog.openError(Messages.FileHistory, ex), owned, null);
         }
         catch (Exception ex)
         {
@@ -819,6 +823,12 @@ public class GitView implements AppInstance
             layout.setCenter(history);
             if (commit != null)
                 history.showCommit(commit);
+        }
+
+        @Override
+        public void compareWithCurrent(final String ref)
+        {
+            git_actions.compareRefs(ref, "HEAD");
         }
 
         @Override
