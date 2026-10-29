@@ -937,6 +937,103 @@ public class GitRepository implements AutoCloseable
         }
     }
 
+    /** Old and new content of a file, empty if the file does not exist on that side */
+    public record Versions(byte[] old_content, byte[] new_content) {}
+
+    private static final byte[] NO_CONTENT = new byte[0];
+
+    /** @param tree Tree, <code>null</code> for none
+     *  @param path File path
+     *  @return Content of the file in the tree, empty if not found
+     */
+    private byte[] getContent(final RevTree tree, final String path) throws Exception
+    {
+        if (tree == null  ||  path == null)
+            return NO_CONTENT;
+        final Repository repository = git.getRepository();
+        try (TreeWalk walk = TreeWalk.forPath(repository, path, tree))
+        {
+            if (walk == null)
+                return NO_CONTENT;
+            return repository.open(walk.getObjectId(0), Constants.OBJ_BLOB).getBytes();
+        }
+    }
+
+    /** @return Tree of HEAD, <code>null</code> if there is no commit */
+    private RevTree getHeadRevTree(final RevWalk walk) throws Exception
+    {
+        final ObjectId head = git.getRepository().resolve(Constants.HEAD);
+        return head == null ? null : walk.parseCommit(head).getTree();
+    }
+
+    /** @return Content of the file in the index (stage 0), empty if not in index */
+    private byte[] getIndexContent(final String path) throws Exception
+    {
+        final DirCache index = git.getRepository().readDirCache();
+        final DirCacheEntry entry = index.getEntry(path);
+        return entry == null ? NO_CONTENT : getContent(entry);
+    }
+
+    /** @return Content of the file in the work tree, empty if it does not exist */
+    private byte[] getWorkTreeContent(final String path) throws Exception
+    {
+        final Path file = new File(getWorkTree(), path).toPath();
+        return Files.isRegularFile(file) ? Files.readAllBytes(file) : NO_CONTENT;
+    }
+
+    /** @param path File path
+     *  @return Staged change: HEAD and index
+     */
+    public synchronized Versions getStagedVersions(final String path) throws Exception
+    {
+        try (RevWalk walk = new RevWalk(git.getRepository()))
+        {
+            return new Versions(getContent(getHeadRevTree(walk), path), getIndexContent(path));
+        }
+    }
+
+    /** @param path File path
+     *  @return Unstaged change: Index and work tree
+     */
+    public synchronized Versions getUnstagedVersions(final String path) throws Exception
+    {
+        return new Versions(getIndexContent(path), getWorkTreeContent(path));
+    }
+
+    /** @param path File path
+     *  @return All uncommitted changes: HEAD and work tree
+     */
+    public synchronized Versions getUncommittedVersions(final String path) throws Exception
+    {
+        try (RevWalk walk = new RevWalk(git.getRepository()))
+        {
+            return new Versions(getContent(getHeadRevTree(walk), path), getWorkTreeContent(path));
+        }
+    }
+
+    /** @param id Commit id
+     *  @param path File path in that commit, new or old path of a rename
+     *  @return File before (first parent, old path of a rename) and after the commit
+     */
+    public synchronized Versions getCommitFileVersions(final String id, final String path) throws Exception
+    {
+        try (RevWalk walk = new RevWalk(git.getRepository());
+             DiffFormatter formatter = createFormatter(DisabledOutputStream.INSTANCE))
+        {
+            final RevCommit commit = walk.parseCommit(ObjectId.fromString(id));
+            final RevTree parent = commit.getParentCount() > 0 ? walk.parseCommit(commit.getParent(0)).getTree() : null;
+            String old_path = path, new_path = path;
+            for (DiffEntry entry : scanCommit(walk, formatter, id))
+                if (path.equals(entry.getNewPath())  ||  path.equals(entry.getOldPath()))
+                {
+                    old_path = entry.getChangeType() == DiffEntry.ChangeType.ADD ? null : entry.getOldPath();
+                    new_path = entry.getChangeType() == DiffEntry.ChangeType.DELETE ? null : entry.getNewPath();
+                    break;
+                }
+            return new Versions(getContent(parent, old_path), getContent(commit.getTree(), new_path));
+        }
+    }
+
     /** Resolve a conflict by using one side's version of the file, then stage it
      *  @param path Conflicting file
      *  @param ours Use our version (current branch), or theirs (branch being merged)?

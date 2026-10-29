@@ -381,6 +381,49 @@ public class GitRepositoryDailyTest
         assertEquals(List.of(), repo.getStatus().unstaged().stream().map(StatusEntry::path).filter(p -> p.equals("new.txt")).toList());
     }
 
+    // --- Versions for widget diff ------------------------------------------------------------------
+
+    @Test
+    public void testVersions() throws Exception
+    {
+        commit(git, "d.bob", "<display>1</display>", "base display");
+        write("d.bob", "<display>2</display>");
+        repo.stage(List.of("d.bob"));
+        write("d.bob", "<display>3</display>");
+
+        var versions = repo.getStagedVersions("d.bob");
+        assertEquals("<display>1</display>", new String(versions.old_content()));
+        assertEquals("<display>2</display>", new String(versions.new_content()));
+        versions = repo.getUnstagedVersions("d.bob");
+        assertEquals("<display>2</display>", new String(versions.old_content()));
+        assertEquals("<display>3</display>", new String(versions.new_content()));
+        versions = repo.getUncommittedVersions("d.bob");
+        assertEquals("<display>1</display>", new String(versions.old_content()));
+        assertEquals("<display>3</display>", new String(versions.new_content()));
+        // New file: No old content
+        write("new.bob", "<display>new</display>");
+        assertEquals(0, repo.getUncommittedVersions("new.bob").old_content().length);
+
+        // Commit with rename and change: Old content from the old path
+        repo.stage(List.of("d.bob"));
+        repo.commit("change", false);
+        Files.move(dir.toPath().resolve("d.bob"), dir.toPath().resolve("renamed.bob"));
+        write("renamed.bob", "<display>3</display>");
+        git.add().addFilepattern(".").call();
+        git.add().setUpdate(true).addFilepattern(".").call();
+        final RevCommit rename = git.commit().setMessage("rename").call();
+        versions = repo.getCommitFileVersions(rename.name(), "renamed.bob");
+        assertEquals("<display>3</display>", new String(versions.old_content()));
+        assertEquals("<display>3</display>", new String(versions.new_content()));
+        // Deleted file: No new content
+        Files.delete(dir.toPath().resolve("renamed.bob"));
+        git.add().setUpdate(true).addFilepattern(".").call();
+        final RevCommit delete = git.commit().setMessage("delete").call();
+        versions = repo.getCommitFileVersions(delete.name(), "renamed.bob");
+        assertEquals("<display>3</display>", new String(versions.old_content()));
+        assertEquals(0, versions.new_content().length);
+    }
+
     // --- Rename branch, ignore, white space -----------------------------------------------------
 
     @Test

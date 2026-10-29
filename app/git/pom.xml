@@ -23,6 +23,16 @@
       <version>5.0.1-SNAPSHOT</version>
     </dependency>
     <dependency>
+      <groupId>org.phoebus</groupId>
+      <artifactId>app-display-editor</artifactId>
+      <version>5.0.1-SNAPSHOT</version>
+    </dependency>
+    <dependency>
+      <groupId>org.phoebus</groupId>
+      <artifactId>app-display-runtime</artifactId>
+      <version>5.0.1-SNAPSHOT</version>
+    </dependency>
+    <dependency>
       <groupId>org.eclipse.jgit</groupId>
       <artifactId>org.eclipse.jgit</artifactId>
       <version>${jgit.version}</version>

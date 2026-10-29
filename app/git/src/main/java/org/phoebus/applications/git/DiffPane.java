@@ -53,10 +53,22 @@ class DiffPane extends BorderPane
     /** Ignore white space, shared by all diff panes */
     private static final BooleanProperty ignore_whitespace = new SimpleBooleanProperty(false);
 
+    /** Display files by widget, shared by all diff panes */
+    private static final BooleanProperty widget_mode = new SimpleBooleanProperty(false);
+
+    /** Query for old and new content of a display file */
+    @FunctionalInterface
+    interface VersionsQuery
+    {
+        GitRepository.Versions get(GitRepository git) throws Exception;
+    }
+
     private final Supplier<GitRepository> repo;
     private final Consumer<Exception> on_error;
     private final ListView<String> unified = new ListView<>();
     private final ListView<Row> split = new ListView<>();
+    private final ListView<String> widgets = new ListView<>();
+    private final CheckBox widget_toggle = new CheckBox(Messages.WidgetMode);
 
     /** Lines of the diff that's currently shown */
     private List<String> lines = List.of();
@@ -66,9 +78,10 @@ class DiffPane extends BorderPane
      */
     private final ChangeListener<Boolean> mode_listener = (p, o, n) -> showLines();
 
-    /** Most recent query and hunk actions, to re-compute the diff */
+    /** Most recent query, hunk actions and widget query, to re-compute the diff */
     private DiffQuery last_query = null;
     private HunkActions last_actions = null;
+    private VersionsQuery last_widget_query = null;
 
     /** Re-computes the diff when the white space option changes, also weak */
     private final ChangeListener<Boolean> whitespace_listener = (p, o, n) -> recompute();
@@ -88,18 +101,24 @@ class DiffPane extends BorderPane
         this.on_error = on_error;
         unified.setCellFactory(view -> new DiffLineCell(() -> hunk_actions));
         split.setCellFactory(view -> new SideBySideCell());
+        widgets.setCellFactory(view -> new WidgetChangeCell());
 
         final CheckBox toggle = new CheckBox(Messages.SideBySide);
         toggle.selectedProperty().bindBidirectional(side_by_side);
         final CheckBox whitespace = new CheckBox(Messages.IgnoreWhitespace);
         whitespace.selectedProperty().bindBidirectional(ignore_whitespace);
-        final HBox options = new HBox(10, whitespace, toggle);
+        widget_toggle.selectedProperty().bindBidirectional(widget_mode);
+        // Only offered for display files
+        widget_toggle.managedProperty().bind(widget_toggle.visibleProperty());
+        widget_toggle.setVisible(false);
+        final HBox options = new HBox(10, widget_toggle, whitespace, toggle);
         options.setAlignment(Pos.CENTER_RIGHT);
         options.setPadding(new Insets(2, 5, 2, 5));
         setTop(options);
 
         side_by_side.addListener(new WeakChangeListener<>(mode_listener));
         ignore_whitespace.addListener(new WeakChangeListener<>(whitespace_listener));
+        widget_mode.addListener(new WeakChangeListener<>(whitespace_listener));
         showLines();
     }
 
@@ -107,7 +126,7 @@ class DiffPane extends BorderPane
     private void recompute()
     {
         if (last_query != null)
-            show(last_query, last_actions);
+            show(last_query, last_actions, last_widget_query);
     }
 
     /** Compute diff in background and show it
@@ -124,13 +143,49 @@ class DiffPane extends BorderPane
      */
     void show(final DiffQuery query, final HunkActions actions)
     {
+        show(query, actions, null);
+    }
+
+    /** Compute diff of a single file in background and show it
+     *  @param query Computes the diff
+     *  @param actions Actions for each hunk, <code>null</code> for none
+     *  @param widget_query For display files, old and new content to compare by widget, otherwise <code>null</code>
+     */
+    void show(final DiffQuery query, final HunkActions actions, final VersionsQuery widget_query)
+    {
         last_query = query;
         last_actions = actions;
+        last_widget_query = widget_query;
+        widget_toggle.setVisible(widget_query != null);
         final GitRepository current = repo.get();
         if (current == null)
             return;
         final boolean ignore = ignore_whitespace.get();
         final long this_request = request.incrementAndGet();
+        if (widget_query != null  &&  widget_mode.get())
+        {
+            JobManager.schedule(Messages.Diff, monitor ->
+            {
+                try
+                {
+                    final GitRepository.Versions versions = widget_query.get(current);
+                    final List<String> result = BobDiff.format(versions.old_content(), versions.new_content());
+                    Platform.runLater(() ->
+                    {
+                        if (this_request == request.get())
+                        {
+                            widgets.getItems().setAll(result);
+                            setCenter(widgets);
+                        }
+                    });
+                }
+                catch (Exception ex)
+                {
+                    on_error.accept(ex);
+                }
+            });
+            return;
+        }
         JobManager.schedule(Messages.Diff, monitor ->
         {
             try
@@ -165,6 +220,8 @@ class DiffPane extends BorderPane
     {
         last_query = null;
         last_actions = null;
+        last_widget_query = null;
+        widget_toggle.setVisible(false);
         hunk_actions = null;
         request.incrementAndGet();
         lines = List.of();
@@ -185,6 +242,31 @@ class DiffPane extends BorderPane
             unified.getItems().setAll(lines);
             split.getItems().clear();
             setCenter(unified);
+        }
+    }
+
+    /** Cell for one widget change: Added green, removed red, changed orange */
+    private static class WidgetChangeCell extends ListCell<String>
+    {
+        @Override
+        protected void updateItem(final String line, final boolean empty)
+        {
+            super.updateItem(line, empty);
+            if (empty  ||  line == null)
+            {
+                setText(null);
+                setStyle(null);
+                return;
+            }
+            setText(line);
+            if (line.startsWith("+"))
+                setStyle("-fx-background-color: #e6ffec;");
+            else if (line.startsWith("-"))
+                setStyle("-fx-background-color: #ffebe9;");
+            else if (line.startsWith("~"))
+                setStyle("-fx-background-color: #fff4e5;");
+            else
+                setStyle("-fx-font-style: italic;");
         }
     }
 

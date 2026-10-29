@@ -21,6 +21,9 @@ public class Messages
     public static String Branch;
     public static String BranchName;
     public static String Browse;
+    public static String CannotParse;
+    public static String ChangedDirtyFiles;
+    public static String ChangedOpenFiles;
     public static String Checkout;
     public static String CheckoutNewBranch;
     public static String CheckoutRemote;
@@ -47,6 +50,7 @@ public class Messages
     public static String CreateBranchHere;
     public static String CreateTag;
     public static String CredentialsTitle;
+    public static String DefaultValue;
     public static String DeleteBranch;
     public static String DeleteBranchConfirm;
     public static String DeleteRemoteTag;
@@ -58,6 +62,7 @@ public class Messages
     public static String DiscardHunk;
     public static String DiscardHunkConfirm;
     public static String DisplayName;
+    public static String DisplayProperties;
     public static String DropStash;
     public static String DropStashConfirm;
     public static String EditRemote;
@@ -67,6 +72,7 @@ public class Messages
     public static String FileStatus;
     public static String ForcePush;
     public static String ForcePushInfo;
+    public static String GitFileHistoryMenu;
     public static String HeaderBranches;
     public static String HeaderRemotes;
     public static String HeaderStashes;
@@ -85,10 +91,16 @@ public class Messages
     public static String MergeIntoCurrent;
     public static String NewRepository;
     public static String NoFastForward;
+    public static String NoOpenFiles;
     public static String NoRepository;
     public static String NoUpstream;
+    public static String NoWidgetChanges;
     public static String NotCommitted;
+    public static String NotInRepository;
     public static String NotMerged;
+    public static String Open;
+    public static String OpenFiles;
+    public static String OpenInEditor;
     public static String PopStash;
     public static String Pull;
     public static String PullRebase;
@@ -100,6 +112,7 @@ public class Messages
     public static String RebaseOnto;
     public static String Recent;
     public static String Refresh;
+    public static String Reload;
     public static String RemoteName;
     public static String RemoteUrl;
     public static String RemoveRemote;
@@ -118,6 +131,7 @@ public class Messages
     public static String SaveCredentials;
     public static String Search;
     public static String SearchPrompt;
+    public static String ShowInGitMenu;
     public static String SideBySide;
     public static String SkipRebase;
     public static String Stage;
@@ -138,6 +152,9 @@ public class Messages
     public static String UnstagedFiles;
     public static String Upstream;
     public static String UpstreamWillBeSet;
+    public static String WidgetAdded;
+    public static String WidgetMode;
+    public static String WidgetRemoved;
     // ---
     // --- Keep alphabetically sorted and 'in sync' with messages.properties!
     // ---

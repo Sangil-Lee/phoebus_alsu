@@ -3,6 +3,7 @@ package org.phoebus.applications.git;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
@@ -15,6 +16,7 @@ import javafx.scene.control.ListCell;
 import javafx.scene.control.ListView;
 import javafx.scene.control.MenuItem;
 import javafx.scene.control.SplitPane;
+import javafx.scene.input.MouseButton;
 
 /** Files changed by a commit, or uncommitted changes, with the diff of the selected file
  *
@@ -40,9 +42,10 @@ class CommitFilesPane extends SplitPane
     /** @param repo Provides the current repository
      *  @param on_error Error handler
      *  @param on_file_history Called with path to show the history of a file
+     *  @param on_open Called with path and 'editor' flag to open a file
      */
     CommitFilesPane(final Supplier<GitRepository> repo, final Consumer<Exception> on_error,
-                    final Consumer<String> on_file_history)
+                    final Consumer<String> on_file_history, final BiConsumer<String, Boolean> on_open)
     {
         this.repo = repo;
         this.on_error = on_error;
@@ -58,11 +61,27 @@ class CommitFilesPane extends SplitPane
             if (file != null  &&  file != ALL)
                 on_file_history.accept(file.path());
         });
-        final ContextMenu menu = new ContextMenu(history);
+        // Open the file in the work tree
+        final MenuItem open = new MenuItem(Messages.Open);
+        open.setOnAction(event -> on_open.accept(files.getSelectionModel().getSelectedItem().path(), false));
+        final MenuItem edit = new MenuItem(Messages.OpenInEditor);
+        edit.setOnAction(event -> on_open.accept(files.getSelectionModel().getSelectedItem().path(), true));
+        final ContextMenu menu = new ContextMenu(open, edit, history);
         menu.setOnShowing(event ->
         {
             final CommitFile file = files.getSelectionModel().getSelectedItem();
-            history.setDisable(file == null  ||  file == ALL);
+            final boolean none = file == null  ||  file == ALL;
+            history.setDisable(none);
+            open.setDisable(none);
+            edit.setDisable(none);
+            edit.setVisible(! none  &&  OpenFiles.isDisplay(file.path()));
+        });
+        files.setOnMouseClicked(event ->
+        {
+            final CommitFile file = files.getSelectionModel().getSelectedItem();
+            if (event.getButton() == MouseButton.PRIMARY  &&  event.getClickCount() == 2  &&
+                file != null  &&  file != ALL)
+                on_open.accept(file.path(), false);
         });
         files.setContextMenu(menu);
 
@@ -155,12 +174,15 @@ class CommitFilesPane extends SplitPane
             final List<String> paths = file == ALL
                 ? files.getItems().stream().filter(f -> f != ALL).map(CommitFile::path).toList()
                 : List.of(file.path());
-            diff.show(git -> git.getUncommittedDiff(paths));
+            final String path = file.path();
+            diff.show(git -> git.getUncommittedDiff(paths), null,
+                      file != ALL  &&  BobDiff.supports(path) ? git -> git.getUncommittedVersions(path) : null);
         }
         else if (file == ALL)
             diff.show(git -> git.getCommitDiff(id));
         else
-            diff.show(git -> git.getCommitFileDiff(id, file.path()));
+            diff.show(git -> git.getCommitFileDiff(id, file.path()), null,
+                      BobDiff.supports(file.path()) ? git -> git.getCommitFileVersions(id, file.path()) : null);
     }
 
     /** File list entry: Colored change type and path */

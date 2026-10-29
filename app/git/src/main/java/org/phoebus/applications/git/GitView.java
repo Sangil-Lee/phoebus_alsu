@@ -30,6 +30,7 @@ import org.phoebus.applications.git.GitRepository.TagInfo;
 import org.phoebus.framework.jobs.JobManager;
 import org.phoebus.framework.jobs.JobRunnable;
 import org.phoebus.framework.persistence.Memento;
+import org.phoebus.framework.workbench.ApplicationService;
 import org.phoebus.framework.spi.AppDescriptor;
 import org.phoebus.framework.spi.AppInstance;
 import org.phoebus.ui.dialog.DialogHelper;
@@ -109,6 +110,15 @@ public class GitView implements AppInstance
     /** Recently opened repositories */
     private final MenuButton recent = new MenuButton(Messages.Recent);
 
+    /** Files open in phoebus tabs, to show their history */
+    private final MenuButton open_files = new MenuButton(Messages.OpenFiles);
+
+    /** Open Git views, accessed on UI thread */
+    private static final List<GitView> views = new ArrayList<>();
+
+    /** File to select in the file status once the repository has been read, or <code>null</code> */
+    private volatile String pending_select = null;
+
     /** Shown while operations are running */
     private final ProgressIndicator busy = new ProgressIndicator();
     private final Label busy_label = new Label();
@@ -155,6 +165,7 @@ public class GitView implements AppInstance
         tab = new DockItem(this, content);
         DockPane.getActiveDockPane().addTab(tab);
         tab.addClosedNotification(this::dispose);
+        views.add(this);
 
         // Refresh when tab is selected, or its window gets the focus
         tab.selectedProperty().addListener((p, o, selected) ->
@@ -209,7 +220,10 @@ public class GitView implements AppInstance
         final Button create = new Button(Messages.NewRepository);
         create.setOnAction(event -> createRepository());
         updateRecentMenu();
-        repo_bar.getChildren().setAll(new Label(Messages.Repository), repo_path, recent, browse, clone, create);
+        open_files.setOnShowing(event -> updateOpenFilesMenu());
+        // Menu needs at least one item to show
+        open_files.getItems().add(new MenuItem());
+        repo_bar.getChildren().setAll(new Label(Messages.Repository), repo_path, recent, browse, clone, create, open_files);
         repo_bar.setAlignment(Pos.CENTER_LEFT);
         repo_bar.setPadding(new Insets(2, 5, 4, 5));
         HBox.setHgrow(repo_path, Priority.ALWAYS);
@@ -409,6 +423,12 @@ public class GitView implements AppInstance
         }
 
         @Override
+        public void openFile(final String path, final boolean editor)
+        {
+            GitView.this.openFile(path, editor);
+        }
+
+        @Override
         public void abortRebase()
         {
             if (confirm(Messages.AbortRebase, Messages.AbortRebaseConfirm))
@@ -511,6 +531,12 @@ public class GitView implements AppInstance
         }
 
         @Override
+        public void openFile(final String path, final boolean editor)
+        {
+            GitView.this.openFile(path, editor);
+        }
+
+        @Override
         public void search(final String text)
         {
             search = text;
@@ -522,6 +548,135 @@ public class GitView implements AppInstance
     private void showFileHistory(final String path)
     {
         new FileHistoryView(() -> repo, path, ex -> showError(Messages.FileHistory, ex));
+    }
+
+    /** @param path File in the work tree
+     *  @param editor Open display in editor, otherwise default application
+     */
+    private void openFile(final String path, final boolean editor)
+    {
+        final GitRepository current = repo;
+        if (current == null)
+            return;
+        final File file = new File(current.getWorkTree(), path);
+        if (file.isFile())
+            OpenFiles.open(file, editor);
+        else
+            showError(Messages.Open, new Exception(file + " does not exist"));
+    }
+
+    /** @return Work tree of this view's repository, <code>null</code> if none */
+    private File getWorkTree()
+    {
+        final GitRepository current = repo;
+        return current == null ? null : current.getWorkTree();
+    }
+
+    /** @param file File
+     *  @return Path of the file relative to the work tree, using '/'
+     */
+    private static String relative(final File work_tree, final File file)
+    {
+        return work_tree.getAbsoluteFile().toPath().relativize(file.getAbsoluteFile().toPath())
+                        .toString().replace(File.separatorChar, '/');
+    }
+
+    /** @param file File
+     *  @return Open Git view whose work tree contains the file, or <code>null</code>
+     */
+    private static GitView findView(final File file)
+    {
+        final String path = file.getAbsolutePath();
+        for (GitView view : views)
+        {
+            final File work_tree = view.getWorkTree();
+            if (work_tree != null  &&  (path + File.separator).startsWith(work_tree.getAbsolutePath() + File.separator))
+                return view;
+        }
+        return null;
+    }
+
+    /** Show the history of a file, from any repository
+     *
+     *  <p>Uses the repository of an open Git view, otherwise opens the repository for the history tab.
+     *
+     *  @param file File inside a git work tree
+     */
+    static void showFileHistory(final File file)
+    {
+        final GitView view = findView(file);
+        if (view != null)
+        {
+            view.showFileHistory(relative(view.getWorkTree(), file));
+            return;
+        }
+        try
+        {
+            final GitRepository owned = new GitRepository(file.isDirectory() ? file : file.getParentFile());
+            new FileHistoryView(() -> owned, relative(owned.getWorkTree(), file),
+                                ex -> ExceptionDetailsErrorDialog.openError(Messages.FileHistory, ex), owned);
+        }
+        catch (Exception ex)
+        {
+            ExceptionDetailsErrorDialog.openError(Messages.FileHistory, Messages.NotInRepository + "\n" + file, ex);
+        }
+    }
+
+    /** Show a file in a Git view: Select its tab or open a new one, and select the file if it changed
+     *  @param file File or directory inside a git work tree
+     */
+    static void showInGit(final File file)
+    {
+        GitView view = findView(file);
+        if (view != null)
+        {
+            view.tab.select();
+            view.pending_select = file.isFile() ? relative(view.getWorkTree(), file) : null;
+            view.sidebar.selectFileStatus();
+            view.refresh();
+            return;
+        }
+        if (! isInRepository(file))
+        {
+            ExceptionDetailsErrorDialog.openError(Messages.ShowInGitMenu, Messages.NotInRepository + "\n" + file, null);
+            return;
+        }
+        final AppDescriptor app = ApplicationService.findApplication(GitApp.Name);
+        view = new GitView(app, file.isDirectory() ? file : file.getParentFile());
+        // Path relative to the work tree is known once the repository has been opened
+        view.pending_absolute = file.isFile() ? file : null;
+    }
+
+    /** File to select once the repository is open, path not yet known relative to work tree */
+    private volatile File pending_absolute = null;
+
+    /** @return Is the file inside a git work tree? */
+    private static boolean isInRepository(final File file)
+    {
+        for (File dir = file.isDirectory() ? file : file.getParentFile(); dir != null; dir = dir.getParentFile())
+            if (new File(dir, Constants.DOT_GIT).exists())
+                return true;
+        return false;
+    }
+
+    /** Update menu of files that are open in phoebus tabs */
+    private void updateOpenFilesMenu()
+    {
+        open_files.getItems().clear();
+        for (OpenFiles.OpenFile open : OpenFiles.list())
+        {
+            final File file = open.file();
+            final MenuItem item = new MenuItem(file.getName() + "   " + file.getParent());
+            item.setOnAction(event -> showFileHistory(file));
+            item.setDisable(! isInRepository(file));
+            open_files.getItems().add(item);
+        }
+        if (open_files.getItems().isEmpty())
+        {
+            final MenuItem none = new MenuItem(Messages.NoOpenFiles);
+            none.setDisable(true);
+            open_files.getItems().add(none);
+        }
     }
 
     /** Handle side bar actions */
@@ -1278,6 +1433,18 @@ public class GitView implements AppInstance
     {
         last_state = state;
         file_status.setChanges(state.status());
+        final File absolute = pending_absolute;
+        if (absolute != null  &&  getWorkTree() != null)
+        {
+            pending_absolute = null;
+            pending_select = relative(getWorkTree(), absolute);
+        }
+        final String select = pending_select;
+        if (select != null)
+        {
+            pending_select = null;
+            file_status.selectFile(select);
+        }
         final String current_branch = state.branches().stream()
                                            .filter(BranchInfo::current)
                                            .map(b -> Constants.R_HEADS + b.name())
@@ -1305,6 +1472,11 @@ public class GitView implements AppInstance
         final GitRepository current = repo;
         if (current == null)
             return;
+        // Files of the work tree open in phoebus tabs, to detect if the operation changed them
+        final List<OpenFiles.OpenFile> open = Platform.isFxApplicationThread()
+                                            ? OpenFiles.list(current.getWorkTree())
+                                            : List.of();
+        final Map<File, String> before = OpenFiles.stamp(open.stream().map(OpenFiles.OpenFile::file).toList());
         schedule(name, monitor ->
         {
             try
@@ -1316,7 +1488,40 @@ public class GitView implements AppInstance
                 showError(name, ex);
             }
             refresh();
+            if (! open.isEmpty())
+            {
+                final Map<File, String> after = OpenFiles.stamp(before.keySet());
+                final List<OpenFiles.OpenFile> changed = open.stream()
+                                                             .filter(o -> ! before.get(o.file()).equals(after.get(o.file())))
+                                                             .toList();
+                if (! changed.isEmpty())
+                    Platform.runLater(() -> handleChangedOpenFiles(changed));
+            }
         });
+    }
+
+    /** Offer to reload open files that a git operation changed, warn about unsaved ones
+     *  @param changed Open files that changed on disk
+     */
+    private void handleChangedOpenFiles(final List<OpenFiles.OpenFile> changed)
+    {
+        final List<OpenFiles.OpenFile> dirty = changed.stream().filter(o -> o.item().isDirty()).toList();
+        final List<OpenFiles.OpenFile> clean = changed.stream().filter(o -> ! o.item().isDirty()).toList();
+        if (! clean.isEmpty())
+        {
+            final String files = clean.stream().map(o -> o.file().getPath()).collect(Collectors.joining("\n"));
+            if (confirm(Messages.Reload, Messages.ChangedOpenFiles + "\n\n" + files))
+                clean.forEach(OpenFiles::reload);
+        }
+        if (! dirty.isEmpty())
+        {
+            final String files = dirty.stream().map(o -> o.file().getPath()).collect(Collectors.joining("\n"));
+            final Alert alert = new Alert(AlertType.WARNING, Messages.ChangedDirtyFiles + "\n\n" + files, ButtonType.OK);
+            alert.setTitle(Messages.Reload);
+            alert.setHeaderText(null);
+            DialogHelper.positionDialog(alert, layout, -200, -100);
+            alert.showAndWait();
+        }
     }
 
     /** Repository operation that may stop with conflicts */
@@ -1353,6 +1558,7 @@ public class GitView implements AppInstance
 
     private void dispose()
     {
+        views.remove(this);
         stopWatcher();
         watchFocus(null);
         final GitRepository current = repo;

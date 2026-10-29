@@ -70,6 +70,17 @@ class FileHistoryView
      */
     FileHistoryView(final Supplier<GitRepository> repo, final String path, final Consumer<Exception> on_error)
     {
+        this(repo, path, on_error, null);
+    }
+
+    /** @param repo Provides the repository
+     *  @param path File path relative to the work tree
+     *  @param on_error Error handler
+     *  @param owned Repository that this view owns and closes when the tab is closed, or <code>null</code>
+     */
+    FileHistoryView(final Supplier<GitRepository> repo, final String path, final Consumer<Exception> on_error,
+                    final GitRepository owned)
+    {
         this.repo = repo;
         this.path = path;
         this.on_error = on_error;
@@ -84,7 +95,10 @@ class FileHistoryView
         history.getSelectionModel().selectedItemProperty().addListener((prop, old, version) ->
         {
             if (version != null)
-                diff.show(git -> git.getCommitFileDiff(version.commit().id(), version.path()));
+                diff.show(git -> git.getCommitFileDiff(version.commit().id(), version.path()), null,
+                          BobDiff.supports(version.path())
+                          ? git -> git.getCommitFileVersions(version.commit().id(), version.path())
+                          : null);
         });
         history_pane = new SplitPane(history, diff);
         history_pane.setOrientation(Orientation.VERTICAL);
@@ -121,6 +135,8 @@ class FileHistoryView
         tab.setContent(layout);
         DockPane.getActiveDockPane().addTab(tab);
         tab.select();
+        if (owned != null)
+            tab.addClosedNotification(owned::close);
 
         load();
     }

@@ -60,6 +60,8 @@ class HistoryPane extends BorderPane
         void showFileHistory(String path);
         /** @param text Text to search in message, author, id; empty to show all commits */
         void search(String text);
+        /** @param editor Open display in editor, otherwise default application */
+        void openFile(String path, boolean editor);
     }
 
     /** Id of the 'Uncommitted changes' row */
@@ -98,7 +100,7 @@ class HistoryPane extends BorderPane
     HistoryPane(final Supplier<GitRepository> repo, final Consumer<Exception> on_error,
                 final boolean all, final Actions actions)
     {
-        details = new CommitFilesPane(repo, on_error, actions::showFileHistory);
+        details = new CommitFilesPane(repo, on_error, actions::showFileHistory, actions::openFile);
 
         final TableColumn<CommitInfo, CommitInfo> description = new TableColumn<>(Messages.ColDescription);
         description.setPrefWidth(600);

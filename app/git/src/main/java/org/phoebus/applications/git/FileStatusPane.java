@@ -20,6 +20,8 @@ import javafx.scene.control.CheckBox;
 import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Label;
 import javafx.scene.control.MenuItem;
+import javafx.scene.control.SeparatorMenuItem;
+import javafx.scene.input.MouseButton;
 import javafx.scene.control.SelectionMode;
 import javafx.scene.control.SplitPane;
 import javafx.scene.control.TableCell;
@@ -67,6 +69,8 @@ class FileStatusPane extends BorderPane
         void skipRebase();
         /** Abort rebase, after asking user */
         void abortRebase();
+        /** @param editor Open display in editor, otherwise default application */
+        void openFile(String path, boolean editor);
     }
 
     /** Row of a file table: Changed file and check box that stages/unstages it */
@@ -269,7 +273,21 @@ class FileStatusPane extends BorderPane
         ignore.setOnAction(event -> actions.ignore(table.getSelectionModel().getSelectedItem().entry.path()));
         final MenuItem history = new MenuItem(Messages.FileHistory);
         history.setOnAction(event -> actions.showFileHistory(table.getSelectionModel().getSelectedItem().entry.path()));
+        // Open file, displays also in editor
+        final MenuItem open = new MenuItem(Messages.Open);
+        open.setOnAction(event -> actions.openFile(table.getSelectionModel().getSelectedItem().entry.path(), false));
+        final MenuItem edit = new MenuItem(Messages.OpenInEditor);
+        edit.setOnAction(event -> actions.openFile(table.getSelectionModel().getSelectedItem().entry.path(), true));
+        menu.getItems().addAll(0, List.of(open, edit, new SeparatorMenuItem()));
         menu.getItems().addAll(ours, theirs, ignore, history);
+        // Double-click opens the file
+        table.setOnMouseClicked(event ->
+        {
+            final FileRow row = table.getSelectionModel().getSelectedItem();
+            if (event.getButton() == MouseButton.PRIMARY  &&  event.getClickCount() == 2  &&
+                row != null  &&  row.entry.type() != ChangeType.DELETED)
+                actions.openFile(row.entry.path(), false);
+        });
         menu.setOnShowing(event ->
         {
             final List<FileRow> selected = table.getSelectionModel().getSelectedItems();
@@ -279,6 +297,10 @@ class FileStatusPane extends BorderPane
             ours.setVisible(conflicts);
             theirs.setVisible(conflicts);
             ignore.setVisible(selected.size() == 1  &&  selected.get(0).entry.type() == ChangeType.UNTRACKED);
+            final boolean single_file = selected.size() == 1  &&  selected.get(0).entry.type() != ChangeType.DELETED;
+            open.setDisable(! single_file);
+            edit.setDisable(! single_file);
+            edit.setVisible(single_file  &&  OpenFiles.isDisplay(selected.get(0).entry.path()));
         });
         table.setContextMenu(menu);
     }
@@ -360,7 +382,11 @@ class FileStatusPane extends BorderPane
             };
         else
             hunk_actions = null;
-        diff.show(git -> is_staged ? git.getStagedDiff(path) : git.getUnstagedDiff(path), hunk_actions);
+        // Display files can also be compared by widget
+        final DiffPane.VersionsQuery widget_query = BobDiff.supports(path)
+            ? git -> is_staged ? git.getStagedVersions(path) : git.getUnstagedVersions(path)
+            : null;
+        diff.show(git -> is_staged ? git.getStagedDiff(path) : git.getUnstagedDiff(path), hunk_actions, widget_query);
     }
 
     private static List<String> getPaths(final List<FileRow> rows)
@@ -392,6 +418,15 @@ class FileStatusPane extends BorderPane
             ! select(diff_staged ? staged : unstaged, diff_path)  &&
             ! select(diff_staged ? unstaged : staged, diff_path))
             diff_path = null;
+    }
+
+    /** Select a file, in the unstaged or staged list, to show its diff
+     *  @param path File path relative to the work tree
+     */
+    void selectFile(final String path)
+    {
+        if (! select(unstaged, path))
+            select(staged, path);
     }
 
     /** @return <code>true</code> if path was found and selected */
