@@ -38,6 +38,22 @@ public class GitApp implements AppResourceDescriptor
     /** Refresh automatically when files or the repository change? */
     @Preference public static boolean auto_refresh;
 
+    /** Check staged display and script files before a commit? */
+    @Preference public static boolean check_before_commit;
+
+    /** Regular expression for PV names in display files, empty to not check */
+    @Preference public static String pv_name_pattern;
+
+    /** Offer logbook entry after push? */
+    @Preference public static boolean logbook_after_push;
+
+    /** Logbooks and tags for logbook entries, comma-separated, empty for default */
+    @Preference public static String logbooks;
+    @Preference public static String log_tags;
+
+    /** Level of logbook entries, empty for default */
+    @Preference public static String log_level;
+
     static
     {
         AnnotatedPreferences.initialize(GitApp.class, "/git_preferences.properties");

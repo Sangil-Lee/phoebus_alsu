@@ -1687,15 +1687,18 @@ public class GitRepository implements AutoCloseable
         push(PushOptions.DEFAULT, credentials);
     }
 
-    /** Push a branch
-     *
-     *  <p>Pushes to the branch's upstream if it has one on that remote,
-     *  otherwise to a branch of the same name, which then becomes the upstream.
-     *
-     *  @param options Push options
-     *  @param credentials Credentials provider
+    /** Where a push goes
+     *  @param branch Local branch
+     *  @param remote Remote
+     *  @param remote_branch Branch on the remote
+     *  @param has_upstream Does the local branch already track a branch?
      */
-    public synchronized void push(final PushOptions options, final CredentialsProvider credentials) throws Exception
+    public record PushTarget(String branch, String remote, String remote_branch, boolean has_upstream) {}
+
+    /** @param options Push options
+     *  @return Where the push goes: Upstream of the branch on that remote, otherwise a branch of the same name
+     */
+    public synchronized PushTarget getPushTarget(final PushOptions options) throws Exception
     {
         final Repository repository = git.getRepository();
         final String branch = options.branch() != null ? options.branch() : repository.getBranch();
@@ -1710,6 +1713,81 @@ public class GitRepository implements AutoCloseable
         final String remote_branch = remote.equals(upstream_remote)  &&  upstream_merge != null
                                    ? Repository.shortenRefName(upstream_merge)
                                    : branch;
+        return new PushTarget(branch, remote, remote_branch, upstream_remote != null);
+    }
+
+    /** @param options Push options
+     *  @return Commits that a push would send, newest first:
+     *          Commits of the branch that the remote branch does not have,
+     *          or for a new branch, commits that no remote branch has
+     */
+    public synchronized List<String> getUnpushedCommits(final PushOptions options) throws Exception
+    {
+        final PushTarget target = getPushTarget(options);
+        final Repository repository = git.getRepository();
+        final List<String> result = new ArrayList<>();
+        try (RevWalk walk = new RevWalk(repository))
+        {
+            walk.markStart(walk.parseCommit(repository.resolve(Constants.R_HEADS + target.branch())));
+            final Ref remote_ref = repository.findRef(Constants.R_REMOTES + target.remote() + "/" + target.remote_branch());
+            if (remote_ref != null)
+                walk.markUninteresting(walk.parseCommit(remote_ref.getObjectId()));
+            else
+                for (Ref ref : repository.getRefDatabase().getRefsByPrefix(Constants.R_REMOTES))
+                    if (! ref.isSymbolic())
+                        walk.markUninteresting(walk.parseCommit(ref.getObjectId()));
+            for (RevCommit commit : walk)
+                result.add(commit.name());
+        }
+        return result;
+    }
+
+    /** Details of a commit for a logbook entry
+     *  @param id Commit id
+     *  @param message Complete message
+     *  @param author Author name
+     *  @param date Commit date
+     */
+    public record CommitDetails(String id, String message, String author, Instant date) {}
+
+    /** @param id Commit id
+     *  @return Details of the commit
+     */
+    public synchronized CommitDetails getCommitDetails(final String id) throws Exception
+    {
+        try (RevWalk walk = new RevWalk(git.getRepository()))
+        {
+            final RevCommit commit = walk.parseCommit(ObjectId.fromString(id));
+            return new CommitDetails(commit.name(), commit.getFullMessage().trim(), commit.getAuthorIdent().getName(),
+                                     Instant.ofEpochSecond(commit.getCommitTime()));
+        }
+    }
+
+    /** @param path File path relative to the work tree
+     *  @return Is the file in the index, i.e. part of the next commit?
+     */
+    public synchronized boolean isInIndex(final String path) throws Exception
+    {
+        return git.getRepository().readDirCache().findEntry(path) >= 0;
+    }
+
+    /** Push a branch
+     *
+     *  <p>Pushes to the branch's upstream if it has one on that remote,
+     *  otherwise to a branch of the same name, which then becomes the upstream.
+     *
+     *  @param options Push options
+     *  @param credentials Credentials provider
+     */
+    public synchronized void push(final PushOptions options, final CredentialsProvider credentials) throws Exception
+    {
+        final Repository repository = git.getRepository();
+        final PushTarget target = getPushTarget(options);
+        final String branch = target.branch();
+        final String remote = target.remote();
+        final String remote_branch = target.remote_branch();
+        final StoredConfig config = repository.getConfig();
+        final String upstream_remote = target.has_upstream() ? remote : null;
         final String destination = Constants.R_HEADS + remote_branch;
         RefSpec spec = new RefSpec(Constants.R_HEADS + branch + ":" + destination);
         final var command = git.push().setRemote(remote);

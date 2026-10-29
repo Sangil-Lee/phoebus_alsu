@@ -24,6 +24,14 @@ public class Messages
     public static String CannotParse;
     public static String ChangedDirtyFiles;
     public static String ChangedOpenFiles;
+    public static String CheckCannotRead;
+    public static String CheckInvalidXml;
+    public static String CheckMissing;
+    public static String CheckMissingOutside;
+    public static String CheckNotCommitted;
+    public static String CheckPVName;
+    public static String CheckPythonSyntax;
+    public static String CheckUnknownWidget;
     public static String Checkout;
     public static String CheckoutNewBranch;
     public static String CheckoutRemote;
@@ -41,6 +49,9 @@ public class Messages
     public static String ColText;
     public static String Commit;
     public static String CommitAndPush;
+    public static String CommitAnyway;
+    public static String CommitCheck;
+    public static String CommitCheckInfo;
     public static String CommitMessagePrompt;
     public static String Commits;
     public static String ConflictsInfo;
@@ -66,6 +77,7 @@ public class Messages
     public static String DropStash;
     public static String DropStashConfirm;
     public static String EditRemote;
+    public static String Error;
     public static String ErrorTitle;
     public static String Fetch;
     public static String FileHistory;
@@ -84,6 +96,11 @@ public class Messages
     public static String IgnorePattern;
     public static String IgnoreWhitespace;
     public static String LoadMore;
+    public static String LogMoreChanges;
+    public static String LogOtherFiles;
+    public static String LogPushedTo;
+    public static String Logbook;
+    public static String LogbookAfterPush;
     public static String MenuPath;
     public static String Merge;
     public static String MergeBranch;
@@ -152,6 +169,7 @@ public class Messages
     public static String UnstagedFiles;
     public static String Upstream;
     public static String UpstreamWillBeSet;
+    public static String Warning;
     public static String WidgetAdded;
     public static String WidgetMode;
     public static String WidgetRemoved;

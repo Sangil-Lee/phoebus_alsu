@@ -111,6 +111,40 @@ Git 작업 후 열린 화면
     위젯은 부모, 종류, 이름으로 짝을 맞춥니다. 이름을 바꾸거나 다른 그룹으로 옮긴 위젯은
     삭제와 추가로 표시됩니다.
 
+커밋 전 검사
+------------
+
+*커밋* 을 누르면 stage한 파일을 먼저 검사합니다. 문제가 있으면 목록을 보여 주고,
+*그래도 커밋* 또는 *취소* 를 고릅니다. 문제가 없으면 바로 커밋합니다.
+
+화면 파일 (``.bob``, ``.bcf``)
+    * **오류** : XML 형식이 잘못됨, Display Builder가 읽을 수 없음,
+      참조하는 파일(연결 화면, embedded 화면, 그림, 스크립트, ``.plt`` 등)이 없음
+    * **경고** : 참조하는 파일이 있지만 이번 커밋에 들어가지 않음(untracked 또는 stage 안 됨),
+      알 수 없는 위젯 종류, 저장소 밖 참조 파일이 없음, PV 이름이 규칙과 다름(``pv_name_pattern`` 설정 시)
+
+    매크로(``$(...)``)가 들어간 경로, URL, 내장 스크립트, ``loc://`` · ``sim://`` PV는 검사하지 않습니다.
+
+파이썬 스크립트 (``.py``)
+    Display Runtime과 같은 Jython(파이썬 2.7) 기준으로 문법을 검사합니다(경고).
+
+설정 ``check_before_commit=false`` 로 끌 수 있습니다.
+
+로그북 기록 (Olog)
+------------------
+
+push가 성공하면 *push한 커밋을 로그북에 기록할까요?* 를 묻습니다. 기록을 고르면 Olog 작성 창이
+다음 내용으로 미리 채워져 열립니다. 내용을 확인·수정한 뒤 Olog 사용자로 제출합니다.
+
+* 제목 : ``Git: 저장소 짧은ID 메시지`` (커밋이 여럿이면 ``Git: 저장소 브랜치 커밋 N개``)
+* 본문 : 저장소, push 대상(원격 URL), 브랜치, 커밋별 메시지·작성자·날짜,
+  바뀐 화면의 위젯 변경 요약, 그 밖에 바뀐 파일
+* 첨부 : 커밋 전체 diff (``.diff``)
+* 로그북·태그·Level : 설정 ``logbooks``, ``log_tags``, ``log_level`` (비우면 로그북 앱 기본값)
+
+이력의 커밋 우클릭 *로그북에 기록...* 으로 특정 커밋을 기록할 수도 있습니다.
+push 후 묻지 않게 하려면 ``logbook_after_push=false`` 로 설정합니다.
+
 파일 이력과 Blame
 -----------------
 
@@ -194,6 +228,22 @@ SSH
 
     # 파일/저장소가 바뀌거나 탭·창으로 돌아올 때 자동 새로 고침
     org.phoebus.applications.git/auto_refresh=true
+
+    # 커밋 전 검사
+    org.phoebus.applications.git/check_before_commit=true
+
+    # PV 이름 규칙(정규식). 비우면 검사하지 않음. 예: [A-Z0-9]+(:[A-Za-z0-9_]+)+
+    org.phoebus.applications.git/pv_name_pattern=
+
+    # push 후 로그북 기록을 제안
+    org.phoebus.applications.git/logbook_after_push=true
+
+    # 로그북 기록에 쓸 로그북과 태그 (쉼표로 구분, 비우면 기본값)
+    org.phoebus.applications.git/logbooks=
+    org.phoebus.applications.git/log_tags=
+
+    # 로그북 기록의 Level (예: Info). 비우면 로그북 앱 기본값
+    org.phoebus.applications.git/log_level=
 
 화면 문구는 JVM 언어 설정을 따릅니다. 한국어 환경에서는 한국어로 나오며,
 영어로 보려면 ``-Duser.language=en`` 으로 실행합니다.

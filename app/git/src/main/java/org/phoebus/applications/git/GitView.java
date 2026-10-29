@@ -28,6 +28,8 @@ import org.phoebus.applications.git.GitRepository.StatusEntry;
 import org.phoebus.applications.git.GitRepository.StashInfo;
 import org.phoebus.applications.git.GitRepository.TagInfo;
 import org.phoebus.framework.jobs.JobManager;
+import org.phoebus.logbook.LogEntry;
+import org.phoebus.logbook.olog.ui.write.LogEntryEditorStage;
 import org.phoebus.framework.jobs.JobRunnable;
 import org.phoebus.framework.persistence.Memento;
 import org.phoebus.framework.workbench.ApplicationService;
@@ -52,6 +54,9 @@ import javafx.scene.control.ChoiceDialog;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.Dialog;
 import javafx.scene.control.Label;
+import javafx.scene.control.ButtonBar;
+import javafx.scene.control.ListCell;
+import javafx.scene.control.ListView;
 import javafx.scene.control.MenuButton;
 import javafx.scene.control.MenuItem;
 import javafx.scene.control.ProgressIndicator;
@@ -366,12 +371,41 @@ public class GitView implements AppInstance
         @Override
         public void commit(final String message, final boolean amend, final boolean push)
         {
+            final GitRepository current = repo;
+            if (current == null)
+                return;
+            if (! GitApp.check_before_commit)
+            {
+                doCommit(message, amend, push);
+                return;
+            }
+            schedule(Messages.CommitCheck, monitor ->
+            {
+                try
+                {
+                    final List<CommitCheck.Problem> problems = CommitCheck.check(current);
+                    Platform.runLater(() ->
+                    {
+                        if (problems.isEmpty()  ||  confirmProblems(problems))
+                            doCommit(message, amend, push);
+                    });
+                }
+                catch (Exception ex)
+                {
+                    showError(Messages.CommitCheck, ex);
+                }
+            });
+        }
+
+        /** Commit, then optionally push */
+        private void doCommit(final String message, final boolean amend, final boolean push)
+        {
             runAndRefresh(Messages.Commit, git ->
             {
                 git.commit(message, amend);
                 Platform.runLater(file_status::clearMessage);
                 if (push)
-                    git.push(PushOptions.DEFAULT, new GitCredentialsProvider(layout));
+                    pushAndOfferLogbook(git, PushOptions.DEFAULT);
             });
         }
 
@@ -506,6 +540,12 @@ public class GitView implements AppInstance
         }
 
         @Override
+        public void logbook(final CommitInfo commit)
+        {
+            openLogbook(List.of(commit.id()), null);
+        }
+
+        @Override
         public void reset(final CommitInfo commit)
         {
             GitView.this.reset(commit);
@@ -542,6 +582,91 @@ public class GitView implements AppInstance
             search = text;
             refresh();
         }
+    }
+
+    /** Push, then offer a logbook entry for the pushed commits
+     *
+     *  <p>Called on a background thread.
+     *
+     *  @param git Repository
+     *  @param options Push options
+     */
+    private void pushAndOfferLogbook(final GitRepository git, final PushOptions options) throws Exception
+    {
+        // Commits that the push sends, determined before the push
+        final List<String> commits = git.getUnpushedCommits(options);
+        final String remote = git.getPushTarget(options).remote();
+        git.push(options, new GitCredentialsProvider(layout));
+        if (GitApp.logbook_after_push  &&  ! commits.isEmpty())
+            Platform.runLater(() ->
+            {
+                if (confirm(Messages.Logbook, Messages.LogbookAfterPush + "\n\n" + String.format(Messages.Commits, commits.size())))
+                    openLogbook(commits, remote);
+            });
+    }
+
+    /** Open logbook editor with an entry for commits
+     *  @param commits Commit ids, newest first
+     *  @param remote Remote that the commits were pushed to, or <code>null</code>
+     */
+    private void openLogbook(final List<String> commits, final String remote)
+    {
+        final GitRepository current = repo;
+        if (current == null)
+            return;
+        schedule(Messages.Logbook, monitor ->
+        {
+            try
+            {
+                final LogEntry entry = GitLogbook.createEntry(current, commits, remote);
+                Platform.runLater(() -> new LogEntryEditorStage(entry).show());
+            }
+            catch (Exception ex)
+            {
+                showError(Messages.Logbook, ex);
+            }
+        });
+    }
+
+    /** Show problems found before a commit
+     *  @param problems Problems
+     *  @return <code>true</code> to commit anyway
+     */
+    private boolean confirmProblems(final List<CommitCheck.Problem> problems)
+    {
+        final ListView<CommitCheck.Problem> list = new ListView<>();
+        list.getItems().setAll(problems);
+        list.setPrefSize(700, 250);
+        list.setCellFactory(view -> new ListCell<>()
+        {
+            @Override
+            protected void updateItem(final CommitCheck.Problem problem, final boolean empty)
+            {
+                super.updateItem(problem, empty);
+                if (empty  ||  problem == null)
+                {
+                    setText(null);
+                    setStyle(null);
+                    return;
+                }
+                final boolean error = problem.severity() == CommitCheck.Severity.ERROR;
+                setText((error ? Messages.Error : Messages.Warning) + "   " + problem.path() + "   " + problem.message());
+                setStyle(error ? "-fx-text-fill: #c62828;" : "-fx-text-fill: #e65100;");
+            }
+        });
+        final Label info = new Label(Messages.CommitCheckInfo);
+        info.setWrapText(true);
+        final VBox content = new VBox(5, info, list);
+
+        final ButtonType commit_anyway = new ButtonType(Messages.CommitAnyway, ButtonBar.ButtonData.OK_DONE);
+        final Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.setTitle(Messages.CommitCheck);
+        dialog.setHeaderText(null);
+        dialog.getDialogPane().setContent(content);
+        dialog.getDialogPane().getButtonTypes().addAll(commit_anyway, ButtonType.CANCEL);
+        dialog.setResizable(true);
+        DialogHelper.positionDialog(dialog, layout, -350, -200);
+        return dialog.showAndWait().orElse(ButtonType.CANCEL) == commit_anyway;
     }
 
     /** @param path File to show in a new 'file history' tab */
@@ -1241,7 +1366,7 @@ public class GitView implements AppInstance
             remote.getValue() == null  ||  branch.getValue() == null)
             return;
         final PushOptions options = new PushOptions(remote.getValue(), branch.getValue(), tags.isSelected(), force.isSelected());
-        runAndRefresh(Messages.Push, git -> git.push(options, new GitCredentialsProvider(layout)));
+        runAndRefresh(Messages.Push, git -> pushAndOfferLogbook(git, options));
     }
 
     /** Prompt for pattern to ignore, based on an untracked file, and add it to .gitignore

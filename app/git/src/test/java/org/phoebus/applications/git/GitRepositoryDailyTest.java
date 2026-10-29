@@ -126,6 +126,24 @@ public class GitRepositoryDailyTest
     }
 
     @Test
+    public void testUnpushedCommits() throws Exception
+    {
+        assertEquals(List.of(), repo.getUnpushedCommits(PushOptions.DEFAULT));
+        final RevCommit one = commit(git, "a.txt", "one\n", "one");
+        final RevCommit two = commit(git, "a.txt", "two\n", "two");
+        assertEquals(List.of(two.name(), one.name()), repo.getUnpushedCommits(PushOptions.DEFAULT));
+        repo.push(PushOptions.DEFAULT, null);
+        assertEquals(List.of(), repo.getUnpushedCommits(PushOptions.DEFAULT));
+
+        // New branch without upstream: Only commits that no remote branch has
+        repo.createBranch("feature", null, true);
+        final RevCommit three = commit(git, "f.txt", "f\n", "three");
+        assertEquals(List.of(three.name()), repo.getUnpushedCommits(PushOptions.DEFAULT));
+        assertEquals("feature", repo.getPushTarget(PushOptions.DEFAULT).remote_branch());
+        assertFalse(repo.getPushTarget(PushOptions.DEFAULT).has_upstream());
+    }
+
+    @Test
     public void testPushToUpstreamWithOtherName() throws Exception
     {
         // Local 'mine' tracks remote 'master'

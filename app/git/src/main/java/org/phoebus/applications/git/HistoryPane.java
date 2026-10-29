@@ -50,6 +50,8 @@ class HistoryPane extends BorderPane
         void createBranch(String commit);
         void cherryPick(CommitInfo commit);
         void revert(CommitInfo commit);
+        /** Create logbook entry for the commit */
+        void logbook(CommitInfo commit);
         /** Reset current branch to commit, after asking for the mode */
         void reset(CommitInfo commit);
         /** Read more commits */
@@ -170,6 +172,8 @@ class HistoryPane extends BorderPane
         revert.setOnAction(event -> actions.revert(getSelected()));
         final MenuItem reset = new MenuItem(Messages.Reset);
         reset.setOnAction(event -> actions.reset(getSelected()));
+        final MenuItem logbook = new MenuItem(Messages.Logbook);
+        logbook.setOnAction(event -> actions.logbook(getSelected()));
         final MenuItem copy = new MenuItem(Messages.CopyId);
         copy.setOnAction(event ->
         {
@@ -178,7 +182,7 @@ class HistoryPane extends BorderPane
             Clipboard.getSystemClipboard().setContent(content);
         });
         final ContextMenu menu = new ContextMenu(tag, branch, new SeparatorMenuItem(),
-                                                 cherry_pick, revert, reset, new SeparatorMenuItem(), copy);
+                                                 cherry_pick, revert, reset, new SeparatorMenuItem(), logbook, copy);
         menu.setOnShowing(event ->
         {
             // Commit operations need an actual commit
