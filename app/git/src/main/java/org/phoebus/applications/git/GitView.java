@@ -2,6 +2,8 @@ package org.phoebus.applications.git;
 
 import java.io.File;
 import java.time.Duration;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -16,6 +18,7 @@ import java.util.stream.Collectors;
 import org.eclipse.jgit.api.errors.NotMergedException;
 import org.eclipse.jgit.lib.BatchingProgressMonitor;
 import org.eclipse.jgit.lib.Constants;
+import org.eclipse.jgit.transport.TagOpt;
 import org.phoebus.applications.git.GitRepository.BranchInfo;
 import org.phoebus.applications.git.GitRepository.ChangeType;
 import org.phoebus.applications.git.GitRepository.CommitFile;
@@ -23,10 +26,12 @@ import org.phoebus.applications.git.GitRepository.CommitInfo;
 import org.phoebus.applications.git.GitRepository.FileStatus;
 import org.phoebus.applications.git.GitRepository.PushOptions;
 import org.phoebus.applications.git.GitRepository.RemoteBranch;
+import org.phoebus.applications.git.GitRepository.RemoteSettings;
 import org.phoebus.applications.git.GitRepository.ResetMode;
 import org.phoebus.applications.git.GitRepository.State;
 import org.phoebus.applications.git.GitRepository.StatusEntry;
 import org.phoebus.applications.git.GitRepository.StashInfo;
+import org.phoebus.applications.git.GitRepository.SubmoduleInfo;
 import org.phoebus.applications.git.GitRepository.TagInfo;
 import org.phoebus.framework.jobs.JobManager;
 import org.phoebus.logbook.LogEntry;
@@ -51,6 +56,7 @@ import javafx.scene.control.Alert.AlertType;
 import javafx.scene.control.Button;
 import javafx.scene.control.ButtonType;
 import javafx.scene.control.CheckBox;
+import javafx.scene.control.ChoiceBox;
 import javafx.scene.control.ChoiceDialog;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.Dialog;
@@ -63,6 +69,7 @@ import javafx.scene.control.MenuItem;
 import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.Separator;
 import javafx.scene.control.SplitPane;
+import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
 import javafx.scene.control.TextInputDialog;
 import javafx.scene.control.ToolBar;
@@ -73,7 +80,9 @@ import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
 import javafx.stage.DirectoryChooser;
+import javafx.stage.FileChooser;
 import javafx.stage.Window;
+import javafx.util.StringConverter;
 
 /** Dock tab for one repository
  *
@@ -216,6 +225,9 @@ public class GitView implements AppInstance
         final Button stash = new Button(Messages.Stash);
         stash.setOnAction(event -> stash());
 
+        final Button apply_patch = new Button(Messages.ApplyPatch);
+        apply_patch.setOnAction(event -> applyPatch());
+
         final Button refresh = new Button(Messages.Refresh,
                                           new ImageView(ImageCache.getImage(DockPane.class, "/icons/refresh.png")));
         refresh.setOnAction(event -> refresh());
@@ -242,7 +254,7 @@ public class GitView implements AppInstance
         busy.setVisible(false);
         busy_label.setVisible(false);
 
-        return new ToolBar(fetch, pull, push, new Separator(), branch, merge, tag, stash, new Separator(), refresh,
+        return new ToolBar(fetch, pull, push, new Separator(), branch, merge, tag, stash, apply_patch, new Separator(), refresh,
                            busy, busy_label);
     }
 
@@ -434,6 +446,14 @@ public class GitView implements AppInstance
         }
 
         @Override
+        public void createPatch(final List<String> paths)
+        {
+            final File file = choosePatchFile("changes.patch", true);
+            if (file != null)
+                writePatch(file, git -> git.getUncommittedPatch(paths));
+        }
+
+        @Override
         public void stageLines(final String path, final Map<Integer, Set<Integer>> lines)
         {
             runAndRefresh(Messages.StageLines, git -> git.stageLines(path, lines));
@@ -573,6 +593,14 @@ public class GitView implements AppInstance
         public void reset(final CommitInfo commit)
         {
             GitView.this.reset(commit);
+        }
+
+        @Override
+        public void createPatch(final CommitInfo commit)
+        {
+            final File file = choosePatchFile(commit.id().substring(0, 7) + ".patch", true);
+            if (file != null)
+                writePatch(file, git -> git.formatPatch(List.of(commit.id())));
         }
 
         @Override
@@ -875,6 +903,40 @@ public class GitView implements AppInstance
             layout.setCenter(history);
             if (commit != null)
                 history.showCommit(commit);
+        }
+
+        @Override
+        public void updateSubmodules(final List<String> paths)
+        {
+            runAndRefresh(Messages.UpdateSubmodule, git -> git.updateSubmodules(paths, new GitCredentialsProvider(layout)));
+        }
+
+        @Override
+        public void openSubmodule(final SubmoduleInfo submodule)
+        {
+            final File work_tree = getWorkTree();
+            if (work_tree != null)
+                new GitView(app, new File(work_tree, submodule.path()));
+        }
+
+        @Override
+        public void remoteSettings(final String name)
+        {
+            final GitRepository current = repo;
+            if (current == null)
+                return;
+            schedule(Messages.RemoteSettings, monitor ->
+            {
+                try
+                {
+                    final RemoteSettings settings = current.getRemoteSettings(name);
+                    Platform.runLater(() -> editRemoteSettings(settings));
+                }
+                catch (Exception ex)
+                {
+                    showError(Messages.RemoteSettings, ex);
+                }
+            });
         }
 
         @Override
@@ -1309,6 +1371,8 @@ public class GitView implements AppInstance
         grid.addRow(0, new Label(Messages.RemoteUrl), url);
         grid.addRow(1, new Label(Messages.CloneParent), parent, browse_parent);
         grid.addRow(2, new Label(Messages.CloneName), name);
+        final CheckBox submodules = new CheckBox(Messages.CloneSubmodules);
+        grid.add(submodules, 1, 3);
 
         final Dialog<ButtonType> dialog = new Dialog<>();
         dialog.setTitle(Messages.Clone);
@@ -1323,11 +1387,12 @@ public class GitView implements AppInstance
 
         final String address = url.getText().trim();
         final File directory = new File(parent.getText().trim(), name.getText().trim());
+        final boolean with_submodules = submodules.isSelected();
         schedule(Messages.Clone, monitor ->
         {
             try
             {
-                GitRepository.cloneRepository(address, directory, new GitCredentialsProvider(layout), new BusyProgress());
+                GitRepository.cloneRepository(address, directory, with_submodules, new GitCredentialsProvider(layout), new BusyProgress());
                 setRepository(directory);
             }
             catch (Exception ex)
@@ -1335,6 +1400,161 @@ public class GitView implements AppInstance
                 showError(Messages.Clone, ex);
             }
         });
+    }
+
+    /** Query that creates a patch */
+    @FunctionalInterface
+    interface PatchQuery
+    {
+        String get(GitRepository git) throws Exception;
+    }
+
+    /** @param name Suggested file name
+     *  @param save Save, or open an existing file?
+     *  @return Selected file, <code>null</code> if cancelled
+     */
+    private File choosePatchFile(final String name, final boolean save)
+    {
+        final FileChooser chooser = new FileChooser();
+        chooser.setTitle(save ? Messages.CreatePatch : Messages.ApplyPatch);
+        final File work_tree = getWorkTree();
+        if (work_tree != null)
+            chooser.setInitialDirectory(work_tree.getParentFile());
+        chooser.setInitialFileName(name);
+        chooser.getExtensionFilters().addAll(new FileChooser.ExtensionFilter(Messages.PatchFiles, "*.patch", "*.diff"),
+                                             new FileChooser.ExtensionFilter(Messages.AllFiles, "*"));
+        final Window window = layout.getScene().getWindow();
+        return save ? chooser.showSaveDialog(window) : chooser.showOpenDialog(window);
+    }
+
+    /** Write patch to file
+     *  @param file File
+     *  @param query Creates the patch
+     */
+    void writePatch(final File file, final PatchQuery query)
+    {
+        final GitRepository current = repo;
+        if (current == null)
+            return;
+        schedule(Messages.CreatePatch, monitor ->
+        {
+            try
+            {
+                Files.writeString(file.toPath(), query.get(current), StandardCharsets.UTF_8);
+            }
+            catch (Exception ex)
+            {
+                showError(Messages.CreatePatch, ex);
+            }
+        });
+    }
+
+    /** Prompt for patch file and apply it */
+    private void applyPatch()
+    {
+        final File file = choosePatchFile("", false);
+        if (file != null)
+            applyPatch(file);
+    }
+
+    /** Show files changed by a patch, apply it after confirmation
+     *  @param file Patch file
+     */
+    void applyPatch(final File file)
+    {
+        final byte[] patch;
+        final List<CommitFile> files;
+        try
+        {
+            patch = Files.readAllBytes(file.toPath());
+            files = GitRepository.getPatchFiles(patch);
+        }
+        catch (Exception ex)
+        {
+            showError(Messages.ApplyPatch, ex);
+            return;
+        }
+        final String list = files.stream()
+                                 .map(f -> f.type() + "  " + (f.old_path() == null ? "" : f.old_path() + " → ") + f.path())
+                                 .collect(Collectors.joining("\n"));
+        if (! confirm(Messages.ApplyPatch, Messages.ApplyPatchConfirm + "\n\n" + list))
+            return;
+        runAndRefresh(Messages.ApplyPatch, git ->
+        {
+            final List<String> updated = git.applyPatch(patch);
+            Platform.runLater(() ->
+            {
+                final Alert alert = new Alert(AlertType.INFORMATION, Messages.ApplyPatchDone + "\n\n" + String.join("\n", updated),
+                                              ButtonType.OK);
+                alert.setTitle(Messages.ApplyPatch);
+                alert.setHeaderText(null);
+                DialogHelper.positionDialog(alert, layout, -200, -100);
+                alert.show();
+            });
+        });
+    }
+
+    /** Prompt for new settings of a remote
+     *  @param settings Current settings
+     */
+    private void editRemoteSettings(final RemoteSettings settings)
+    {
+        final TextField fetch_url = new TextField(settings.fetch_url());
+        fetch_url.setPrefColumnCount(40);
+        final TextField push_url = new TextField(settings.push_url());
+        push_url.setPromptText(Messages.PushUrlDefault);
+        final TextArea fetch_specs = new TextArea(String.join("\n", settings.fetch_specs()));
+        fetch_specs.setPrefRowCount(3);
+        final TextArea push_specs = new TextArea(String.join("\n", settings.push_specs()));
+        push_specs.setPrefRowCount(3);
+        push_specs.setPromptText(Messages.PushSpecsDefault);
+        final CheckBox prune = new CheckBox(Messages.Prune);
+        prune.setSelected(settings.prune());
+        final ChoiceBox<TagOpt> tags = new ChoiceBox<>();
+        tags.getItems().setAll(TagOpt.AUTO_FOLLOW, TagOpt.FETCH_TAGS, TagOpt.NO_TAGS);
+        tags.setConverter(new StringConverter<>()
+        {
+            @Override
+            public String toString(final TagOpt value)
+            {
+                return value == TagOpt.FETCH_TAGS ? Messages.TagsAll
+                     : value == TagOpt.NO_TAGS    ? Messages.TagsNone
+                                                  : Messages.TagsAuto;
+            }
+
+            @Override
+            public TagOpt fromString(final String text)
+            {
+                return null;
+            }
+        });
+        tags.setValue(settings.tags());
+
+        final GridPane grid = new GridPane();
+        grid.setHgap(5);
+        grid.setVgap(5);
+        grid.addRow(0, new Label(Messages.FetchUrl), fetch_url);
+        grid.addRow(1, new Label(Messages.PushUrl), push_url);
+        grid.addRow(2, new Label(Messages.FetchSpecs), fetch_specs);
+        grid.addRow(3, new Label(Messages.PushSpecs), push_specs);
+        grid.addRow(4, new Label(Messages.Tags), tags);
+        grid.add(prune, 1, 5);
+
+        final Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.setTitle(Messages.RemoteSettings);
+        dialog.setHeaderText(settings.name());
+        dialog.setResizable(true);
+        dialog.getDialogPane().setContent(grid);
+        dialog.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
+        dialog.getDialogPane().lookupButton(ButtonType.OK).disableProperty().bind(fetch_url.textProperty().isEmpty());
+        DialogHelper.positionDialog(dialog, layout, -300, -200);
+        if (dialog.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK)
+            return;
+        final RemoteSettings update = new RemoteSettings(settings.name(), fetch_url.getText().trim(), push_url.getText().trim(),
+                                                         List.of(fetch_specs.getText().split("\\R")),
+                                                         List.of(push_specs.getText().split("\\R")),
+                                                         prune.isSelected(), tags.getValue());
+        runAndRefresh(Messages.RemoteSettings, git -> git.setRemoteSettings(update));
     }
 
     /** Prompt for pull options and pull */

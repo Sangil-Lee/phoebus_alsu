@@ -56,6 +56,8 @@ class HistoryPane extends BorderPane
         void reset(CommitInfo commit);
         /** Interactive rebase of the commits after this one */
         void interactiveRebase(CommitInfo commit);
+        /** Save the commit as a patch file */
+        void createPatch(CommitInfo commit);
         /** Read more commits */
         void loadMore();
         /** Show the uncommitted changes in the file status */
@@ -180,6 +182,8 @@ class HistoryPane extends BorderPane
         rebase.setOnAction(event -> actions.interactiveRebase(getSelected()));
         final MenuItem logbook = new MenuItem(Messages.Logbook);
         logbook.setOnAction(event -> actions.logbook(getSelected()));
+        final MenuItem patch = new MenuItem(Messages.CreatePatch);
+        patch.setOnAction(event -> actions.createPatch(getSelected()));
         final MenuItem copy = new MenuItem(Messages.CopyId);
         copy.setOnAction(event ->
         {
@@ -197,7 +201,7 @@ class HistoryPane extends BorderPane
         });
         final ContextMenu menu = new ContextMenu(tag, branch, new SeparatorMenuItem(),
                                                  cherry_pick, revert, reset, rebase, new SeparatorMenuItem(),
-                                                 compare_work, compare_other, new SeparatorMenuItem(), logbook, copy);
+                                                 compare_work, compare_other, new SeparatorMenuItem(), patch, logbook, copy);
         menu.setOnShowing(event ->
         {
             // Commit operations need an actual commit

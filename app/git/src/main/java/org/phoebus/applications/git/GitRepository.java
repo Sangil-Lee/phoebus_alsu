@@ -8,6 +8,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
@@ -18,11 +19,13 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import org.eclipse.jgit.api.AddCommand;
 import org.eclipse.jgit.api.CheckoutCommand.Stage;
+import org.eclipse.jgit.api.ApplyResult;
 import org.eclipse.jgit.api.CherryPickResult;
 import org.eclipse.jgit.api.CreateBranchCommand.SetupUpstreamMode;
 import org.eclipse.jgit.api.Git;
@@ -37,6 +40,9 @@ import org.eclipse.jgit.api.ResetCommand.ResetType;
 import org.eclipse.jgit.api.RevertCommand;
 import org.eclipse.jgit.api.RmCommand;
 import org.eclipse.jgit.api.Status;
+import org.eclipse.jgit.submodule.SubmoduleStatus;
+import org.eclipse.jgit.submodule.SubmoduleStatusType;
+import org.eclipse.jgit.submodule.SubmoduleWalk;
 import org.eclipse.jgit.api.TransportCommand;
 import org.eclipse.jgit.blame.BlameResult;
 import org.eclipse.jgit.diff.ContentSource;
@@ -52,6 +58,7 @@ import org.eclipse.jgit.dircache.DirCacheEntry;
 import org.eclipse.jgit.dircache.DirCacheIterator;
 import org.eclipse.jgit.lib.AbbreviatedObjectId;
 import org.eclipse.jgit.lib.BranchTrackingStatus;
+import org.eclipse.jgit.lib.ConfigConstants;
 import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.FileMode;
 import org.eclipse.jgit.lib.NullProgressMonitor;
@@ -85,6 +92,8 @@ import org.eclipse.jgit.transport.CredentialsProvider;
 import org.eclipse.jgit.transport.PushResult;
 import org.eclipse.jgit.transport.RefLeaseSpec;
 import org.eclipse.jgit.transport.RefSpec;
+import org.eclipse.jgit.transport.RemoteConfig;
+import org.eclipse.jgit.transport.TagOpt;
 import org.eclipse.jgit.transport.RemoteRefUpdate;
 import org.eclipse.jgit.transport.SshTransport;
 import org.eclipse.jgit.transport.URIish;
@@ -230,7 +239,7 @@ public class GitRepository implements AutoCloseable
     public record State(String branch, FileStatus status, List<CommitInfo> log,
                         List<BranchInfo> branches, Map<String, List<RemoteBranch>> remotes,
                         Map<String, String> remote_urls,
-                        List<TagInfo> tags, List<StashInfo> stashes) {}
+                        List<TagInfo> tags, List<StashInfo> stashes, List<SubmoduleInfo> submodules) {}
 
     private final Git git;
 
@@ -247,11 +256,26 @@ public class GitRepository implements AutoCloseable
                                        final CredentialsProvider credentials,
                                        final ProgressMonitor monitor) throws Exception
     {
+        cloneRepository(url, directory, false, credentials, monitor);
+    }
+
+    /** Clone a repository
+     *  @param url Remote URL
+     *  @param directory Directory for the new work tree, must not exist or be empty
+     *  @param submodules Also clone submodules?
+     *  @param credentials Credentials provider
+     *  @param monitor Progress monitor
+     */
+    public static void cloneRepository(final String url, final File directory, final boolean submodules,
+                                       final CredentialsProvider credentials,
+                                       final ProgressMonitor monitor) throws Exception
+    {
         if (directory.exists()  &&  directory.list().length > 0)
             throw new Exception("Directory is not empty: " + directory);
         final var command = Git.cloneRepository()
                                .setURI(url)
                                .setDirectory(directory)
+                               .setCloneSubmodules(submodules)
                                .setProgressMonitor(monitor);
         configure(command, credentials);
         command.call().close();
@@ -344,7 +368,7 @@ public class GitRepository implements AutoCloseable
     public synchronized State getState(final int log_count, final boolean all_branches, final String search) throws Exception
     {
         return new State(getBranch(), getStatus(), getLog(log_count, all_branches, search),
-                         getBranches(), getRemoteBranches(), getRemoteUrls(), getTags(), getStashes());
+                         getBranches(), getRemoteBranches(), getRemoteUrls(), getTags(), getStashes(), getSubmodules());
     }
 
     /** @return URL of each remote, by remote name */
@@ -2040,9 +2064,294 @@ public class GitRepository implements AutoCloseable
     {
         for (String remote : git.getRepository().getRemoteNames())
         {
-            final var command = git.fetch().setRemote(remote).setRemoveDeletedRefs(true);
+            final var command = git.fetch().setRemote(remote).setRemoveDeletedRefs(isPrune(remote));
+            final TagOpt tags = RemoteConfig.getAllRemoteConfigs(git.getRepository().getConfig()).stream()
+                                            .filter(r -> r.getName().equals(remote))
+                                            .map(RemoteConfig::getTagOpt)
+                                            .findFirst().orElse(TagOpt.AUTO_FOLLOW);
+            command.setTagOpt(tags);
             configure(command, credentials);
             command.call();
+        }
+    }
+
+    /** @param remote Remote
+     *  @return Remove branches that were deleted on the remote when fetching?
+     *          Setting of the remote, else general setting, else <code>true</code>
+     */
+    private boolean isPrune(final String remote)
+    {
+        final StoredConfig config = git.getRepository().getConfig();
+        if (config.getNames("remote", remote).contains("prune"))
+            return config.getBoolean("remote", remote, "prune", true);
+        if (config.getNames("fetch").contains("prune"))
+            return config.getBoolean("fetch", null, "prune", true);
+        return true;
+    }
+
+    /** Settings of a remote
+     *  @param name Name
+     *  @param fetch_url URL for fetching
+     *  @param push_url URL for pushing, empty to use the fetch URL
+     *  @param fetch_specs Fetch ref specs
+     *  @param push_specs Push ref specs, empty for default
+     *  @param prune Remove branches deleted on the remote when fetching?
+     *  @param tags How to fetch tags
+     */
+    public record RemoteSettings(String name, String fetch_url, String push_url,
+                                 List<String> fetch_specs, List<String> push_specs,
+                                 boolean prune, TagOpt tags) {}
+
+    /** @param name Remote name
+     *  @return Settings of the remote
+     */
+    public synchronized RemoteSettings getRemoteSettings(final String name) throws Exception
+    {
+        final RemoteConfig remote = new RemoteConfig(git.getRepository().getConfig(), name);
+        return new RemoteSettings(name,
+                                  remote.getURIs().isEmpty() ? "" : remote.getURIs().get(0).toString(),
+                                  remote.getPushURIs().isEmpty() ? "" : remote.getPushURIs().get(0).toString(),
+                                  remote.getFetchRefSpecs().stream().map(RefSpec::toString).toList(),
+                                  remote.getPushRefSpecs().stream().map(RefSpec::toString).toList(),
+                                  isPrune(name),
+                                  remote.getTagOpt());
+    }
+
+    /** @param settings New settings of the remote */
+    public synchronized void setRemoteSettings(final RemoteSettings settings) throws Exception
+    {
+        final StoredConfig config = git.getRepository().getConfig();
+        final RemoteConfig remote = new RemoteConfig(config, settings.name());
+        for (URIish uri : List.copyOf(remote.getURIs()))
+            remote.removeURI(uri);
+        remote.addURI(new URIish(settings.fetch_url()));
+        for (URIish uri : List.copyOf(remote.getPushURIs()))
+            remote.removePushURI(uri);
+        if (! settings.push_url().isBlank())
+            remote.addPushURI(new URIish(settings.push_url().trim()));
+        final List<RefSpec> fetch = new ArrayList<>();
+        for (String spec : settings.fetch_specs())
+            if (! spec.isBlank())
+                fetch.add(new RefSpec(spec.trim()));
+        remote.setFetchRefSpecs(fetch);
+        final List<RefSpec> push = new ArrayList<>();
+        for (String spec : settings.push_specs())
+            if (! spec.isBlank())
+                push.add(new RefSpec(spec.trim()));
+        remote.setPushRefSpecs(push);
+        remote.setTagOpt(settings.tags());
+        remote.update(config);
+        config.setBoolean("remote", settings.name(), "prune", settings.prune());
+        config.save();
+    }
+
+    // --- Patches ---------------------------------------------------------------
+
+    private static final DateTimeFormatter PATCH_DATE = DateTimeFormatter.RFC_1123_DATE_TIME;
+
+    /** Create a patch in the format of 'git format-patch', all commits in one mailbox
+     *  @param ids Commits, any order
+     *  @return Patch, oldest commit first
+     */
+    public synchronized String formatPatch(final Collection<String> ids) throws Exception
+    {
+        final Repository repository = git.getRepository();
+        final List<RevCommit> commits = new ArrayList<>();
+        try (RevWalk walk = new RevWalk(repository))
+        {
+            // Parents before children
+            final Set<ObjectId> selected = new HashSet<>();
+            for (String id : ids)
+            {
+                final RevCommit commit = walk.parseCommit(ObjectId.fromString(id));
+                selected.add(commit.getId());
+                walk.markStart(commit);
+            }
+            walk.sort(RevSort.TOPO, true);
+            walk.sort(RevSort.REVERSE, true);
+            for (RevCommit commit : walk)
+                if (selected.contains(commit.getId()))
+                    commits.add(commit);
+            walk.reset();
+            final StringBuilder patch = new StringBuilder();
+            for (int i=0; i<commits.size(); ++i)
+            {
+                final RevCommit commit = commits.get(i);
+                final PersonIdent author = commit.getAuthorIdent();
+                final String number = commits.size() > 1 ? "[PATCH " + (i+1) + "/" + commits.size() + "] " : "[PATCH] ";
+                patch.append("From ").append(commit.name()).append(" Mon Sep 17 00:00:00 2001\n")
+                     .append("From: ").append(author.getName()).append(" <").append(author.getEmailAddress()).append(">\n")
+                     .append("Date: ").append(PATCH_DATE.format(author.getWhenAsInstant().atZone(author.getZoneId()))).append("\n")
+                     .append("Subject: ").append(number).append(commit.getShortMessage()).append("\n\n");
+                final String body = commit.getFullMessage().substring(commit.getShortMessage().length()).strip();
+                if (! body.isEmpty())
+                    patch.append(body).append("\n");
+                patch.append("---\n");
+                final ByteArrayOutputStream out = new ByteArrayOutputStream();
+                try (DiffFormatter formatter = new DiffFormatter(out))
+                {
+                    formatter.setRepository(repository);
+                    formatter.setDetectRenames(true);
+                    formatter.getRenameDetector().setRenameScore(RENAME_SCORE);
+                    formatter.format(commit.getParentCount() > 0 ? walk.parseCommit(commit.getParent(0)).getTree() : null,
+                                     commit.getTree());
+                }
+                patch.append(out.toString(StandardCharsets.UTF_8))
+                     .append("-- \nphoebus git\n\n");
+            }
+            return patch.toString();
+        }
+    }
+
+    /** @param patch Patch
+     *  @return Files changed by the patch
+     */
+    public static List<CommitFile> getPatchFiles(final byte[] patch) throws Exception
+    {
+        final Patch parsed = new Patch();
+        parsed.parse(new ByteArrayInputStream(patch));
+        if (! parsed.getErrors().isEmpty())
+            throw new Exception(parsed.getErrors().get(0).getMessage());
+        final List<CommitFile> result = new ArrayList<>();
+        for (FileHeader file : parsed.getFiles())
+            result.add(toCommitFile(file));
+        return result;
+    }
+
+    /** Apply a patch to the work tree
+     *  @param patch Patch, unified diff or mailbox of 'git format-patch'
+     *  @return Updated files
+     *  @throws Exception if the patch does not apply
+     */
+    public synchronized List<String> applyPatch(final byte[] patch) throws Exception
+    {
+        final ApplyResult result = git.apply().setPatch(new ByteArrayInputStream(patch)).call();
+        final File top = getWorkTree().getAbsoluteFile();
+        return result.getUpdatedFiles().stream()
+                     .map(file -> top.toPath().relativize(file.getAbsoluteFile().toPath()).toString().replace(File.separatorChar, '/'))
+                     .sorted()
+                     .toList();
+    }
+
+    // --- Submodules ------------------------------------------------------------
+
+    /** State of a submodule */
+    public enum SubmoduleState
+    {
+        /** Not initialized, no work tree */
+        UNINITIALIZED,
+        /** Checked out commit differs from the one recorded in the parent */
+        DIFFERENT,
+        /** Checked out commit as recorded */
+        OK,
+        /** Configured, but missing */
+        MISSING
+    }
+
+    /** Submodule
+     *  @param path Path in the parent repository
+     *  @param url URL
+     *  @param recorded Commit recorded in the parent
+     *  @param actual Commit checked out in the submodule, <code>null</code> if not initialized
+     *  @param state State
+     */
+    public record SubmoduleInfo(String path, String url, String recorded, String actual, SubmoduleState state) {}
+
+    /** @return Submodules */
+    public synchronized List<SubmoduleInfo> getSubmodules() throws Exception
+    {
+        final List<SubmoduleInfo> result = new ArrayList<>();
+        // Avoid walking the index when there are no submodules
+        if (! new File(getWorkTree(), Constants.DOT_GIT_MODULES).exists())
+            return result;
+        for (Map.Entry<String, SubmoduleStatus> entry : new TreeMap<>(git.submoduleStatus().call()).entrySet())
+        {
+            final SubmoduleStatus status = entry.getValue();
+            final SubmoduleState state = switch (status.getType())
+            {
+                case MISSING -> SubmoduleState.MISSING;
+                case UNINITIALIZED -> SubmoduleState.UNINITIALIZED;
+                case REV_CHECKED_OUT -> SubmoduleState.DIFFERENT;
+                default -> SubmoduleState.OK;
+            };
+            String url = "";
+            try (SubmoduleWalk walk = SubmoduleWalk.forIndex(git.getRepository()))
+            {
+                walk.setFilter(PathFilter.create(entry.getKey()));
+                if (walk.next())
+                    url = walk.getModulesUrl() == null ? "" : walk.getModulesUrl();
+            }
+            result.add(new SubmoduleInfo(entry.getKey(), url,
+                                         status.getIndexId() == null ? null : status.getIndexId().name(),
+                                         status.getHeadId() == null ? null : status.getHeadId().name(),
+                                         state));
+        }
+        return result;
+    }
+
+    /** Initialize and update submodules: Clone if needed, check out recorded commit
+     *  @param paths Submodule paths, empty for all
+     *  @param credentials Credentials provider
+     */
+    public synchronized void updateSubmodules(final Collection<String> paths, final CredentialsProvider credentials) throws Exception
+    {
+        final var init = git.submoduleInit();
+        paths.forEach(init::addPath);
+        init.call();
+        // After 'git submodule deinit', the submodule's repository remains in .git/modules.
+        // Re-connect it to the work tree, JGit would otherwise fail to clone into that existing directory.
+        for (Map.Entry<String, SubmoduleStatus> entry : git.submoduleStatus().call().entrySet())
+            if (entry.getValue().getType() == SubmoduleStatusType.UNINITIALIZED  &&
+                (paths.isEmpty()  ||  paths.contains(entry.getKey()))  &&
+                entry.getValue().getIndexId() != null)
+                reconnectSubmodule(entry.getKey(), entry.getValue().getIndexId());
+        final var update = git.submoduleUpdate();
+        paths.forEach(update::addPath);
+        configure(update, credentials);
+        update.call();
+    }
+
+    /** @param paths Changed files, relative to the work tree
+     *  @return Patch of the uncommitted changes from HEAD to the work tree, never ignoring white space
+     */
+    public synchronized String getUncommittedPatch(final Collection<String> paths) throws Exception
+    {
+        final Repository repository = git.getRepository();
+        final ByteArrayOutputStream out = new ByteArrayOutputStream();
+        try (ObjectReader reader = repository.newObjectReader();
+             DiffFormatter formatter = new DiffFormatter(out))
+        {
+            formatter.setRepository(repository);
+            formatter.setDetectRenames(true);
+            formatter.getRenameDetector().setRenameScore(RENAME_SCORE);
+            formatter.setPathFilter(PathFilterGroup.createFromStrings(paths));
+            formatter.format(getHeadTree(reader), new FileTreeIterator(repository));
+            formatter.flush();
+        }
+        return out.toString(StandardCharsets.UTF_8);
+    }
+
+    /** Re-connect a submodule whose repository exists in .git/modules
+     *  @param path Submodule path
+     *  @param recorded Commit recorded for the submodule
+     */
+    private void reconnectSubmodule(final String path, final ObjectId recorded) throws Exception
+    {
+        final File module = new File(git.getRepository().getDirectory(), Constants.MODULES + "/" + path);
+        final File work = new File(getWorkTree(), path);
+        if (! module.isDirectory()  ||  new File(work, Constants.DOT_GIT).exists())
+            return;
+        work.mkdirs();
+        Files.writeString(new File(work, Constants.DOT_GIT).toPath(),
+                          "gitdir: " + work.toPath().relativize(module.toPath()).toString().replace(File.separatorChar, '/') + "\n");
+        try (Repository sub = new FileRepositoryBuilder().setGitDir(module).setWorkTree(work).build();
+             Git sub_git = Git.wrap(sub))
+        {
+            final StoredConfig config = sub.getConfig();
+            config.setString(ConfigConstants.CONFIG_CORE_SECTION, null, ConfigConstants.CONFIG_KEY_WORKTREE,
+                             module.toPath().relativize(work.toPath()).toString().replace(File.separatorChar, '/'));
+            config.save();
+            sub_git.reset().setMode(ResetType.HARD).setRef(recorded.name()).call();
         }
     }
 

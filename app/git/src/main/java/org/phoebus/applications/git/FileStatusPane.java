@@ -80,6 +80,8 @@ class FileStatusPane extends BorderPane
         void abortRebase();
         /** @param editor Open display in editor, otherwise default application */
         void openFile(String path, boolean editor);
+        /** Save uncommitted changes of the files as a patch file */
+        void createPatch(List<String> paths);
     }
 
     /** Row of a file table: Changed file and check box that stages/unstages it */
@@ -291,13 +293,15 @@ class FileStatusPane extends BorderPane
         // Compare with or replace with other version
         final Menu compare = git_actions.createCompareMenu(() -> getPaths(table.getSelectionModel().getSelectedItems()));
         final Menu restore = git_actions.createRestoreMenu(() -> getPaths(table.getSelectionModel().getSelectedItems()));
+        final MenuItem patch = new MenuItem(Messages.CreatePatch);
+        patch.setOnAction(event -> actions.createPatch(getPaths(table.getSelectionModel().getSelectedItems())));
         // Open file, displays also in editor
         final MenuItem open = new MenuItem(Messages.Open);
         open.setOnAction(event -> actions.openFile(table.getSelectionModel().getSelectedItem().entry.path(), false));
         final MenuItem edit = new MenuItem(Messages.OpenInEditor);
         edit.setOnAction(event -> actions.openFile(table.getSelectionModel().getSelectedItem().entry.path(), true));
         menu.getItems().addAll(0, List.of(open, edit, new SeparatorMenuItem()));
-        menu.getItems().addAll(merge_tool, ours, theirs, ignore, history, new SeparatorMenuItem(), compare, restore);
+        menu.getItems().addAll(merge_tool, ours, theirs, ignore, history, new SeparatorMenuItem(), compare, restore, patch);
         // Double-click opens the file
         table.setOnMouseClicked(event ->
         {
@@ -324,6 +328,7 @@ class FileStatusPane extends BorderPane
                                                                                    row.entry.type() == ChangeType.CONFLICT);
             compare.setDisable(! tracked);
             restore.setDisable(! tracked);
+            patch.setDisable(! tracked);
             ignore.setVisible(selected.size() == 1  &&  selected.get(0).entry.type() == ChangeType.UNTRACKED);
             final boolean single_file = selected.size() == 1  &&  selected.get(0).entry.type() != ChangeType.DELETED;
             open.setDisable(! single_file);

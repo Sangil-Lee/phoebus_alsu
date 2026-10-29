@@ -9,6 +9,8 @@ import org.phoebus.applications.git.GitRepository.BranchInfo;
 import org.phoebus.applications.git.GitRepository.RemoteBranch;
 import org.phoebus.applications.git.GitRepository.State;
 import org.phoebus.applications.git.GitRepository.StashInfo;
+import org.phoebus.applications.git.GitRepository.SubmoduleInfo;
+import org.phoebus.applications.git.GitRepository.SubmoduleState;
 import org.phoebus.applications.git.GitRepository.TagInfo;
 
 import javafx.scene.control.ContextMenu;
@@ -56,6 +58,12 @@ class GitSidebar extends TreeView<Object>
         void removeRemote(String name);
         /** @param ref Branch or tag to compare with the current branch */
         void compareWithCurrent(String ref);
+        /** @param paths Submodules to initialize and update, empty for all */
+        void updateSubmodules(List<String> paths);
+        /** Open submodule in a new Git view */
+        void openSubmodule(SubmoduleInfo submodule);
+        /** Edit fetch/push URLs, ref specs, ... of a remote */
+        void remoteSettings(String name);
     }
 
     /** Section header */
@@ -75,6 +83,7 @@ class GitSidebar extends TreeView<Object>
     private final TreeItem<Object> tags = new TreeItem<>(new Header(Messages.HeaderTags));
     private final TreeItem<Object> remotes = new TreeItem<>(new Header(Messages.HeaderRemotes));
     private final TreeItem<Object> stashes = new TreeItem<>(new Header(Messages.HeaderStashes));
+    private final TreeItem<Object> submodules = new TreeItem<>(new Header(Messages.HeaderSubmodules));
 
     /** Ignore selection changes while updating the tree */
     private boolean updating = false;
@@ -180,6 +189,8 @@ class GitSidebar extends TreeView<Object>
             return "tag:" + tag.name();
         if (value instanceof StashInfo stash)
             return "stash:" + stash.commit();
+        if (value instanceof SubmoduleInfo submodule)
+            return "submodule:" + submodule.path();
         return String.valueOf(value);
     }
 
@@ -194,6 +205,14 @@ class GitSidebar extends TreeView<Object>
         branches.getChildren().setAll(state.branches().stream().map(b -> new TreeItem<Object>(b)).toList());
         tags.getChildren().setAll(state.tags().stream().map(t -> new TreeItem<Object>(t)).toList());
         stashes.getChildren().setAll(state.stashes().stream().map(s -> new TreeItem<Object>(s)).toList());
+        submodules.getChildren().setAll(state.submodules().stream().map(s -> new TreeItem<Object>(s)).toList());
+        submodules.setExpanded(true);
+        // Section only shown when there are submodules
+        final List<TreeItem<Object>> sections = getRoot().getChildren();
+        if (state.submodules().isEmpty())
+            sections.remove(submodules);
+        else if (! sections.contains(submodules))
+            sections.add(submodules);
 
         remotes.getChildren().clear();
         for (Map.Entry<String, List<RemoteBranch>> entry : state.remotes().entrySet())
@@ -215,12 +234,16 @@ class GitSidebar extends TreeView<Object>
     {
         SidebarCell()
         {
-            // Double-click on local branch checks it out
+            // Double-click on local branch checks it out, on submodule opens it
             setOnMouseClicked(event ->
             {
-                if (event.getButton() == MouseButton.PRIMARY  &&  event.getClickCount() == 2  &&
-                    getItem() instanceof BranchInfo branch  &&  ! branch.current())
-                    actions.checkout(branch);
+                if (event.getButton() == MouseButton.PRIMARY  &&  event.getClickCount() == 2)
+                {
+                    if (getItem() instanceof BranchInfo branch  &&  ! branch.current())
+                        actions.checkout(branch);
+                    else if (getItem() instanceof SubmoduleInfo submodule  &&  submodule.state() != SubmoduleState.UNINITIALIZED)
+                        actions.openSubmodule(submodule);
+                }
             });
         }
 
@@ -246,6 +269,12 @@ class GitSidebar extends TreeView<Object>
                     add.setOnAction(event -> actions.addRemote());
                     setContextMenu(new ContextMenu(add));
                 }
+                else if (getTreeItem() == submodules)
+                {
+                    final MenuItem update = new MenuItem(Messages.UpdateAllSubmodules);
+                    update.setOnAction(event -> actions.updateSubmodules(List.of()));
+                    setContextMenu(new ContextMenu(update));
+                }
             }
             else if (value instanceof Workspace ws)
                 setText(ws.label());
@@ -268,9 +297,11 @@ class GitSidebar extends TreeView<Object>
                     setTooltip(new Tooltip(remote.url()));
                 final MenuItem edit = new MenuItem(Messages.EditRemote);
                 edit.setOnAction(event -> actions.editRemote(remote.name(), remote.url()));
+                final MenuItem settings = new MenuItem(Messages.RemoteSettings);
+                settings.setOnAction(event -> actions.remoteSettings(remote.name()));
                 final MenuItem remove = new MenuItem(Messages.RemoveRemote);
                 remove.setOnAction(event -> actions.removeRemote(remote.name()));
-                setContextMenu(new ContextMenu(edit, remove));
+                setContextMenu(new ContextMenu(edit, settings, remove));
             }
             else if (value instanceof RemoteBranch branch)
             {
@@ -286,6 +317,26 @@ class GitSidebar extends TreeView<Object>
             {
                 setText(stash.message());
                 setContextMenu(createMenu(stash));
+            }
+            else if (value instanceof SubmoduleInfo submodule)
+            {
+                setText(switch (submodule.state())
+                {
+                    case UNINITIALIZED -> submodule.path() + "  (" + Messages.SubmoduleUninitialized + ")";
+                    case DIFFERENT     -> submodule.path() + "  (" + Messages.SubmoduleDifferent + ")";
+                    case MISSING       -> submodule.path() + "  (" + Messages.SubmoduleMissing + ")";
+                    default            -> submodule.path();
+                });
+                setTooltip(new Tooltip(submodule.url() + "\n" + Messages.SubmoduleRecorded + ": " +
+                                       (submodule.recorded() == null ? "-" : submodule.recorded().substring(0, 7)) +
+                                       "\n" + Messages.SubmoduleActual + ": " +
+                                       (submodule.actual() == null ? "-" : submodule.actual().substring(0, 7))));
+                final MenuItem update = new MenuItem(Messages.UpdateSubmodule);
+                update.setOnAction(event -> actions.updateSubmodules(List.of(submodule.path())));
+                final MenuItem open = new MenuItem(Messages.OpenSubmodule);
+                open.setDisable(submodule.state() == SubmoduleState.UNINITIALIZED);
+                open.setOnAction(event -> actions.openSubmodule(submodule));
+                setContextMenu(new ContextMenu(update, open));
             }
         }
     }
