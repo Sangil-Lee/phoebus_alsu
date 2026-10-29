@@ -54,6 +54,9 @@ public class GitApp implements AppResourceDescriptor
     /** Level of logbook entries, empty for default */
     @Preference public static String log_level;
 
+    /** Show git state of files in the File Browser? */
+    @Preference public static boolean file_browser_decorations;
+
     static
     {
         AnnotatedPreferences.initialize(GitApp.class, "/git_preferences.properties");

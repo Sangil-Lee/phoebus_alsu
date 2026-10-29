@@ -444,6 +444,45 @@ public class GitRepository implements AutoCloseable
         return result;
     }
 
+    /** State of files for decorating them in a file browser
+     *  @param changes Changed files by path, staged or not
+     *  @param ignored Ignored files and directories that are not in the index
+     *  @param branch Current branch
+     *  @param ahead Commits ahead of upstream
+     *  @param behind Commits behind upstream
+     */
+    public record FileStates(Map<String, ChangeType> changes, Set<String> ignored, String branch, int ahead, int behind) {}
+
+    /** @return State of files */
+    public synchronized FileStates getFileStates() throws Exception
+    {
+        final Status status = git.status().call();
+        final Map<String, ChangeType> changes = new HashMap<>();
+        for (String path : status.getUntracked())
+            changes.put(path, ChangeType.UNTRACKED);
+        for (String path : status.getAdded())
+            changes.put(path, ChangeType.ADDED);
+        for (String path : status.getRemoved())
+            changes.put(path, ChangeType.DELETED);
+        for (String path : status.getMissing())
+            changes.put(path, ChangeType.DELETED);
+        for (String path : status.getChanged())
+            changes.put(path, ChangeType.MODIFIED);
+        for (String path : status.getModified())
+            changes.put(path, ChangeType.MODIFIED);
+        for (String path : status.getConflicting())
+            changes.put(path, ChangeType.CONFLICT);
+        final String branch = git.getRepository().getBranch();
+        int ahead = 0, behind = 0;
+        final BranchTrackingStatus tracking = BranchTrackingStatus.of(git.getRepository(), branch);
+        if (tracking != null)
+        {
+            ahead = tracking.getAheadCount();
+            behind = tracking.getBehindCount();
+        }
+        return new FileStates(changes, Set.copyOf(status.getIgnoredNotInIndex()), branch, ahead, behind);
+    }
+
     /** @return Staged and unstaged changes */
     public synchronized FileStatus getStatus() throws Exception
     {

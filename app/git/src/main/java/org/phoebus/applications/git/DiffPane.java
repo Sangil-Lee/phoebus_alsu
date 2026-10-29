@@ -1,7 +1,10 @@
 package org.phoebus.applications.git;
 
+import java.io.File;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
@@ -20,6 +23,7 @@ import javafx.scene.control.CheckBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListCell;
 import javafx.scene.control.ListView;
+import javafx.scene.input.MouseButton;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
@@ -78,6 +82,12 @@ class DiffPane extends BorderPane
      */
     private final ChangeListener<Boolean> mode_listener = (p, o, n) -> showLines();
 
+    /** Path of the display file shown by widget, <code>null</code> if not known */
+    private String widget_path = null;
+
+    /** Widget key for each line of the widget changes, <code>null</code> if line is not for a widget */
+    private List<String> widget_keys = List.of();
+
     /** Most recent query, hunk actions and widget query, to re-compute the diff */
     private DiffQuery last_query = null;
     private HunkActions last_actions = null;
@@ -102,6 +112,14 @@ class DiffPane extends BorderPane
         unified.setCellFactory(view -> new DiffLineCell(() -> hunk_actions));
         split.setCellFactory(view -> new SideBySideCell());
         widgets.setCellFactory(view -> new WidgetChangeCell());
+        // Double-click on a widget selects it in the display editor
+        widgets.setOnMouseClicked(event ->
+        {
+            final int index = widgets.getSelectionModel().getSelectedIndex();
+            if (event.getButton() == MouseButton.PRIMARY  &&  event.getClickCount() == 2  &&
+                index >= 0  &&  index < widget_keys.size())
+                selectInEditor(widget_keys.get(index));
+        });
 
         final CheckBox toggle = new CheckBox(Messages.SideBySide);
         toggle.selectedProperty().bindBidirectional(side_by_side);
@@ -126,7 +144,7 @@ class DiffPane extends BorderPane
     private void recompute()
     {
         if (last_query != null)
-            show(last_query, last_actions, last_widget_query);
+            show(last_query, last_actions, last_widget_query, widget_path);
     }
 
     /** Compute diff in background and show it
@@ -153,6 +171,18 @@ class DiffPane extends BorderPane
      */
     void show(final DiffQuery query, final HunkActions actions, final VersionsQuery widget_query)
     {
+        show(query, actions, widget_query, null);
+    }
+
+    /** Compute diff of a single file in background and show it
+     *  @param query Computes the diff
+     *  @param actions Actions for each hunk, <code>null</code> for none
+     *  @param widget_query For display files, old and new content to compare by widget, otherwise <code>null</code>
+     *  @param widget_path Path of the display file in the work tree, to select widgets in an editor, or <code>null</code>
+     */
+    void show(final DiffQuery query, final HunkActions actions, final VersionsQuery widget_query, final String widget_path)
+    {
+        this.widget_path = widget_path;
         last_query = query;
         last_actions = actions;
         last_widget_query = widget_query;
@@ -169,11 +199,13 @@ class DiffPane extends BorderPane
                 try
                 {
                     final GitRepository.Versions versions = widget_query.get(current);
-                    final List<String> result = BobDiff.format(versions.old_content(), versions.new_content());
+                    final List<String> keys = new ArrayList<>();
+                    final List<String> result = BobDiff.format(versions.old_content(), versions.new_content(), keys);
                     Platform.runLater(() ->
                     {
                         if (this_request == request.get())
                         {
+                            widget_keys = keys;
                             widgets.getItems().setAll(result);
                             setCenter(widgets);
                         }
@@ -211,6 +243,32 @@ class DiffPane extends BorderPane
             catch (Exception ex)
             {
                 on_error.accept(ex);
+            }
+        });
+    }
+
+    /** Select a widget in the display editor, opening the display if necessary
+     *  @param key Widget key, <code>null</code> for none
+     */
+    private void selectInEditor(final String key)
+    {
+        final GitRepository current = repo.get();
+        if (key == null  ||  key.isEmpty()  ||  widget_path == null  ||  current == null)
+            return;
+        final File file = new File(current.getWorkTree(), widget_path);
+        if (GitEditorSupport.selectWidget(file, key)  ||  ! file.isFile())
+            return;
+        // Open in editor, then select once loaded
+        OpenFiles.open(file, true);
+        JobManager.schedule(Messages.OpenInEditor, monitor ->
+        {
+            for (int i=0; i<50; ++i)
+            {
+                Thread.sleep(200);
+                final CompletableFuture<Boolean> selected = new CompletableFuture<>();
+                Platform.runLater(() -> selected.complete(GitEditorSupport.selectWidget(file, key)));
+                if (selected.get())
+                    return;
             }
         });
     }

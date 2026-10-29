@@ -12,7 +12,6 @@ import java.util.Optional;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.logging.Level;
-import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import org.phoebus.applications.git.GitRepository.BranchInfo;
@@ -21,6 +20,7 @@ import org.phoebus.applications.git.GitRepository.TagInfo;
 import org.phoebus.framework.jobs.JobManager;
 import org.phoebus.ui.dialog.DialogHelper;
 import org.phoebus.ui.dialog.ExceptionDetailsErrorDialog;
+import org.phoebus.ui.docking.DockItem;
 
 import javafx.application.Platform;
 import javafx.geometry.Insets;
@@ -74,6 +74,9 @@ class GitActions
     private final Node owner;
     private final Runner runner;
 
+    /** Repository to close when the first tab opened by these actions closes, or <code>null</code> */
+    private GitRepository owned = null;
+
     /** @param repo Provides the repository
      *  @param owner Node used to position dialogs
      *  @param runner Runs operations and refreshes, <code>null</code> to simply run them
@@ -83,6 +86,23 @@ class GitActions
         this.repo = repo;
         this.owner = owner;
         this.runner = runner != null ? runner : this::runInBackground;
+    }
+
+    /** @param owned Repository that is closed when the first tab opened by these actions is closed */
+    void setOwned(final GitRepository owned)
+    {
+        this.owned = owned;
+    }
+
+    /** Called by tabs that use these actions
+     *  @param tab Tab that will close the owned repository
+     */
+    void addTab(final DockItem tab)
+    {
+        final GitRepository close = owned;
+        owned = null;
+        if (close != null)
+            tab.addClosedNotification(close::close);
     }
 
     /** @return Repository, may be <code>null</code> */
@@ -397,13 +417,5 @@ class GitActions
     void openMergeTool(final String path)
     {
         new MergeView(this, path);
-    }
-
-    /** @param paths Paths
-     *  @return Paths as one line each
-     */
-    static String list(final Collection<String> paths)
-    {
-        return paths.stream().collect(Collectors.joining("\n"));
     }
 }

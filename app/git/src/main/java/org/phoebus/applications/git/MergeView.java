@@ -84,6 +84,7 @@ class MergeView
         tab.setContent(layout);
         layout.setCenter(new Label(Messages.Loading));
         DockPane.getActiveDockPane().addTab(tab);
+        actions.addTab(tab);
         tab.select();
         load();
     }

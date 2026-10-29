@@ -406,7 +406,7 @@ class FileStatusPane extends BorderPane
         final DiffPane.VersionsQuery widget_query = BobDiff.supports(path)
             ? git -> is_staged ? git.getStagedVersions(path) : git.getUnstagedVersions(path)
             : null;
-        diff.show(git -> is_staged ? git.getStagedDiff(path) : git.getUnstagedDiff(path), hunk_actions, widget_query);
+        diff.show(git -> is_staged ? git.getStagedDiff(path) : git.getUnstagedDiff(path), hunk_actions, widget_query, path);
     }
 
     private static List<String> getPaths(final List<FileRow> rows)

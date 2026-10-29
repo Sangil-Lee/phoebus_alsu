@@ -301,7 +301,7 @@ class CommitFilesPane extends SplitPane
             {
                 final List<String> paths = file.old_path() == null ? List.of(file.path()) : List.of(file.path(), file.old_path());
                 diff.show(git -> git.getDiff(a, b, paths), null,
-                          BobDiff.supports(file.path()) ? git -> git.getVersions(a, b, file) : null);
+                          BobDiff.supports(file.path()) ? git -> git.getVersions(a, b, file) : null, file.path());
             }
         }
         else if (id == null)
@@ -312,13 +312,13 @@ class CommitFilesPane extends SplitPane
                 : List.of(file.path());
             final String path = file.path();
             diff.show(git -> git.getUncommittedDiff(paths), null,
-                      file != ALL  &&  BobDiff.supports(path) ? git -> git.getUncommittedVersions(path) : null);
+                      file != ALL  &&  BobDiff.supports(path) ? git -> git.getUncommittedVersions(path) : null, path);
         }
         else if (file == ALL)
             diff.show(git -> git.getCommitDiff(id));
         else
             diff.show(git -> git.getCommitFileDiff(id, file.path()), null,
-                      BobDiff.supports(file.path()) ? git -> git.getCommitFileVersions(id, file.path()) : null);
+                      BobDiff.supports(file.path()) ? git -> git.getCommitFileVersions(id, file.path()) : null, file.path());
     }
 
     /** File list entry: Colored change type and path */

@@ -24,6 +24,7 @@ public class Messages
     public static String CannotParse;
     public static String ChangedDirtyFiles;
     public static String ChangedOpenFiles;
+    public static String ChangedWidgetsInfo;
     public static String CheckCannotRead;
     public static String CheckInvalidXml;
     public static String CheckMissing;
@@ -40,6 +41,7 @@ public class Messages
     public static String CloneName;
     public static String CloneParent;
     public static String ColAuthor;
+    public static String ColChanges;
     public static String ColDate;
     public static String ColDescription;
     public static String ColId;
@@ -81,6 +83,7 @@ public class Messages
     public static String DiscardHunkConfirm;
     public static String DisplayName;
     public static String DisplayProperties;
+    public static String DisplayPropertiesChanged;
     public static String DropStash;
     public static String DropStashConfirm;
     public static String EditConflict;
@@ -93,7 +96,12 @@ public class Messages
     public static String FileStatus;
     public static String ForcePush;
     public static String ForcePushInfo;
+    public static String GitDisplayCompare;
+    public static String GitDisplayHistory;
     public static String GitFileHistoryMenu;
+    public static String GitSelectChanged;
+    public static String GitStatus;
+    public static String GitWidgetHistory;
     public static String HEAD;
     public static String HeaderBranches;
     public static String HeaderRemotes;
@@ -128,12 +136,15 @@ public class Messages
     public static String MergeToolMenu;
     public static String NewRepository;
     public static String NextConflict;
+    public static String NoChangedWidgets;
     public static String NoConflicts;
+    public static String NoDisplayFile;
     public static String NoFastForward;
     public static String NoOpenFiles;
     public static String NoRepository;
     public static String NoUpstream;
     public static String NoWidgetChanges;
+    public static String NoWidgetHistory;
     public static String NotCommitted;
     public static String NotInRepository;
     public static String NotInRevision;
@@ -213,6 +224,7 @@ public class Messages
     public static String UseTheirsThenOurs;
     public static String Warning;
     public static String WidgetAdded;
+    public static String WidgetHistoryTitle;
     public static String WidgetMode;
     public static String WidgetRemoved;
     public static String WorkTree;

@@ -74,6 +74,7 @@ class CompareView
         tab = new DockItem(Messages.Compare + " " + name + a + " ↔ " + b);
         tab.setContent(layout);
         DockPane.getActiveDockPane().addTab(tab);
+        actions.addTab(tab);
         tab.select();
         load();
     }

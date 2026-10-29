@@ -103,7 +103,8 @@ class FileHistoryView
                 diff.show(git -> git.getCommitFileDiff(version.commit().id(), version.path()), null,
                           BobDiff.supports(version.path())
                           ? git -> git.getCommitFileVersions(version.commit().id(), version.path())
-                          : null);
+                          : null,
+                          path);
         });
         history.getSelectionModel().setSelectionMode(SelectionMode.MULTIPLE);
         history.setContextMenu(createContextMenu(actions != null ? actions : new GitActions(repo, layout, null)));

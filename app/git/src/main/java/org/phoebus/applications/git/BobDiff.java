@@ -42,8 +42,10 @@ class BobDiff
      *  @param property Changed property, <code>null</code> for added or removed widget
      *  @param old_value Old value, <code>null</code> if property was not set (default)
      *  @param new_value New value, <code>null</code> if property is no longer set (default)
+     *  @param key Key of the widget: Parent key, type, name and number among widgets of same type and name,
+     *             for example "/group:Box/textupdate:temp#2", empty for the display
      */
-    record Change(Kind kind, String widget, String property, String old_value, String new_value) {}
+    record Change(Kind kind, String widget, String property, String old_value, String new_value, String key) {}
 
     /** Widget found in a display file */
     private record WidgetInfo(String description, Map<String, String> properties) {}
@@ -76,20 +78,20 @@ class BobDiff
             final WidgetInfo after = entry.getValue();
             final WidgetInfo before = old_widgets.get(entry.getKey());
             if (before == null)
-                changes.add(new Change(Kind.ADDED, after.description(), null, null, null));
+                changes.add(new Change(Kind.ADDED, after.description(), null, null, null, entry.getKey()));
             else
                 for (String property : new TreeSet<>(union(before.properties().keySet(), after.properties().keySet())))
                 {
                     final String old_value = before.properties().get(property);
                     final String new_value = after.properties().get(property);
                     if (! Objects.equals(old_value, new_value))
-                        changes.add(new Change(Kind.CHANGED, after.description(), property, old_value, new_value));
+                        changes.add(new Change(Kind.CHANGED, after.description(), property, old_value, new_value, entry.getKey()));
                 }
         }
         // Widgets only in the old file: Removed
         for (Map.Entry<String, WidgetInfo> entry : old_widgets.entrySet())
             if (! new_widgets.containsKey(entry.getKey()))
-                changes.add(new Change(Kind.REMOVED, entry.getValue().description(), null, null, null));
+                changes.add(new Change(Kind.REMOVED, entry.getValue().description(), null, null, null, entry.getKey()));
         return changes;
     }
 
@@ -261,6 +263,30 @@ class BobDiff
      */
     static List<String> format(final byte[] old_content, final byte[] new_content)
     {
+        return format(old_content, new_content, null);
+    }
+
+    /** @param change Change
+     *  @return Line that describes the change
+     */
+    static String format(final Change change)
+    {
+        return switch (change.kind())
+        {
+            case ADDED   -> "+ " + Messages.WidgetAdded + ": " + change.widget();
+            case REMOVED -> "- " + Messages.WidgetRemoved + ": " + change.widget();
+            case CHANGED -> "~ " + change.widget() + "   " + change.property() + ": "
+                                 + shorten(change.old_value()) + "  →  " + shorten(change.new_value());
+        };
+    }
+
+    /** @param old_content Old file content, empty if the file was added
+     *  @param new_content New file content, empty if the file was removed
+     *  @param keys Receives the widget key for each line, may be <code>null</code>
+     *  @return Lines that describe the changes: "+ ..." added, "- ..." removed, "~ ..." changed
+     */
+    static List<String> format(final byte[] old_content, final byte[] new_content, final List<String> keys)
+    {
         final List<String> lines = new ArrayList<>();
         final List<Change> changes;
         try
@@ -270,18 +296,22 @@ class BobDiff
         catch (Exception ex)
         {
             lines.add("! " + Messages.CannotParse + ": " + ex.getMessage());
+            if (keys != null)
+                keys.add(null);
             return lines;
         }
         if (changes.isEmpty())
+        {
             lines.add(Messages.NoWidgetChanges);
+            if (keys != null)
+                keys.add(null);
+        }
         for (Change change : changes)
-            lines.add(switch (change.kind())
-            {
-                case ADDED   -> "+ " + Messages.WidgetAdded + ": " + change.widget();
-                case REMOVED -> "- " + Messages.WidgetRemoved + ": " + change.widget();
-                case CHANGED -> "~ " + change.widget() + "   " + change.property() + ": "
-                                     + shorten(change.old_value()) + "  →  " + shorten(change.new_value());
-            });
+        {
+            lines.add(format(change));
+            if (keys != null)
+                keys.add(change.key());
+        }
         return lines;
     }
 }

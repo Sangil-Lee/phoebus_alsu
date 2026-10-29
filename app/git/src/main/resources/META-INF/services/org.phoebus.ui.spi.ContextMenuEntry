@@ -1,2 +1,6 @@
 org.phoebus.applications.git.GitFileHistoryMenuEntry
 org.phoebus.applications.git.GitShowInGitMenuEntry
+org.phoebus.applications.git.GitWidgetMenuEntry$SelectChanged
+org.phoebus.applications.git.GitWidgetMenuEntry$WidgetHistory
+org.phoebus.applications.git.GitWidgetMenuEntry$DisplayHistory
+org.phoebus.applications.git.GitWidgetMenuEntry$CompareWithHead
