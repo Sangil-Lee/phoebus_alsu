@@ -4,15 +4,18 @@ import java.io.File;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.logging.Level;
 
 import org.phoebus.applications.git.MergeModel.Chunk;
 import org.phoebus.applications.git.MergeModel.Choice;
 import org.phoebus.framework.jobs.JobManager;
 import org.phoebus.ui.dialog.DialogHelper;
+import org.phoebus.ui.dialog.ExceptionDetailsErrorDialog;
 import org.phoebus.ui.docking.DockItem;
 import org.phoebus.ui.docking.DockPane;
 
 import javafx.application.Platform;
+import javafx.beans.property.SimpleStringProperty;
 import javafx.geometry.Insets;
 import javafx.geometry.Orientation;
 import javafx.geometry.Pos;
@@ -25,6 +28,11 @@ import javafx.scene.control.Label;
 import javafx.scene.control.ListCell;
 import javafx.scene.control.ListView;
 import javafx.scene.control.SplitPane;
+import javafx.scene.control.Tab;
+import javafx.scene.control.TabPane;
+import javafx.scene.control.TableColumn;
+import javafx.scene.control.TableView;
+import javafx.scene.control.cell.ComboBoxTableCell;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.TextInputDialog;
 import javafx.scene.control.TitledPane;
@@ -106,7 +114,19 @@ class MergeView
                 if (MergeModel.isBinary(b)  ||  MergeModel.isBinary(o)  ||  MergeModel.isBinary(t))
                     throw new Exception(Messages.MergeBinary);
                 final MergeModel merged = new MergeModel(b, o, t);
-                Platform.runLater(() -> show(merged));
+                // Display files can also be merged by widget
+                BobMerge by_widget = null;
+                if (BobDiff.supports(path))
+                    try
+                    {
+                        by_widget = new BobMerge(b, o, t);
+                    }
+                    catch (Exception ex)
+                    {
+                        GitApp.logger.log(Level.FINE, "Cannot merge " + path + " by widget", ex);
+                    }
+                final BobMerge widget_merge = by_widget;
+                Platform.runLater(() -> show(merged, widget_merge));
             }
             catch (Exception ex)
             {
@@ -124,8 +144,10 @@ class MergeView
         });
     }
 
-    /** @param merged Merge to show */
-    private void show(final MergeModel merged)
+    /** @param merged Merge to show
+     *  @param widget_merge Merge by widget, <code>null</code> if not possible
+     */
+    private void show(final MergeModel merged, final BobMerge widget_merge)
     {
         model = merged;
         for (ListView<SideLine> side : List.of(base, ours, theirs))
@@ -159,9 +181,118 @@ class MergeView
         split.setOrientation(Orientation.VERTICAL);
         split.setDividerPositions(0.45);
 
-        layout.setTop(createToolbar());
-        layout.setCenter(split);
+        final BorderPane text_pane = new BorderPane(split);
+        text_pane.setTop(createToolbar());
+        if (widget_merge == null)
+            layout.setCenter(text_pane);
+        else
+        {
+            final Tab by_widget = new Tab(Messages.MergeByWidget, createWidgetPane(widget_merge));
+            final Tab by_text = new Tab(Messages.MergeByText, text_pane);
+            final TabPane tabs = new TabPane(by_widget, by_text);
+            tabs.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
+            layout.setCenter(tabs);
+        }
         update(true);
+    }
+
+    /** @param merge Merge by widget
+     *  @return Pane with changes taken from 'theirs' and conflicts by widget and property
+     */
+    private Node createWidgetPane(final BobMerge merge)
+    {
+        final ListView<String> automatic = new ListView<>();
+        automatic.getItems().setAll(merge.getAutomatic());
+        automatic.setPlaceholder(new Label(Messages.MergeNoAutomatic));
+
+        final TableView<BobMerge.Conflict> conflicts = new TableView<>();
+        conflicts.getColumns().add(TableHelper.createColumn(Messages.ColWidget, 250, c -> c.widget));
+        conflicts.getColumns().add(TableHelper.createColumn(Messages.ColProperty, 120,
+                                   c -> c.property == null ? Messages.MergeWholeWidget : c.property));
+        conflicts.getColumns().add(TableHelper.createColumn(Messages.MergeOurs, 200, c -> c.ours));
+        conflicts.getColumns().add(TableHelper.createColumn(Messages.MergeTheirs, 200, c -> c.theirs));
+        final TableColumn<BobMerge.Conflict, String> choice = new TableColumn<>(Messages.ColChoice);
+        choice.setPrefWidth(150);
+        final String[] labels = { Messages.Unresolved, Messages.UseOurs, Messages.UseTheirs };
+        choice.setCellValueFactory(cell -> new SimpleStringProperty(labels[cell.getValue().choice.ordinal()]));
+        choice.setCellFactory(ComboBoxTableCell.forTableColumn(labels));
+        choice.setOnEditCommit(event ->
+        {
+            event.getRowValue().choice = BobMerge.Choice.values()[List.of(labels).indexOf(event.getNewValue())];
+            updateWidgetStatus(merge);
+        });
+        conflicts.getColumns().add(choice);
+        conflicts.setEditable(true);
+        conflicts.getItems().setAll(merge.getConflicts());
+        conflicts.setPlaceholder(new Label(Messages.NoConflicts));
+
+        final Button all_ours = new Button(Messages.MergeAllOurs);
+        all_ours.setOnAction(event ->
+        {
+            merge.getConflicts().forEach(c -> c.choice = BobMerge.Choice.OURS);
+            conflicts.refresh();
+            updateWidgetStatus(merge);
+        });
+        final Button all_theirs = new Button(Messages.MergeAllTheirs);
+        all_theirs.setOnAction(event ->
+        {
+            merge.getConflicts().forEach(c -> c.choice = BobMerge.Choice.THEIRS);
+            conflicts.refresh();
+            updateWidgetStatus(merge);
+        });
+        final Button save_widgets = new Button(Messages.SaveAndResolve);
+        save_widgets.setOnAction(event -> saveWidgets(merge));
+        final Region spacer = new Region();
+        HBox.setHgrow(spacer, Priority.ALWAYS);
+        final ToolBar toolbar = new ToolBar(widget_status, all_ours, all_theirs, spacer, save_widgets);
+        updateWidgetStatus(merge);
+
+        final SplitPane split = new SplitPane(titled(Messages.MergeAutomatic + " (" + merge.getAutomatic().size() + ")", automatic),
+                                              titled(Messages.MergeConflicts + " (" + merge.getConflicts().size() + ")", conflicts));
+        split.setOrientation(Orientation.VERTICAL);
+        split.setDividerPositions(0.35);
+        final BorderPane pane = new BorderPane(split);
+        pane.setTop(toolbar);
+        return pane;
+    }
+
+    private final Label widget_status = new Label();
+
+    private void updateWidgetStatus(final BobMerge merge)
+    {
+        widget_status.setText(Messages.WidgetConflictStatus.formatted(merge.getConflicts().size(), merge.getUnresolved()));
+    }
+
+    /** Write the result of the merge by widget and stage it */
+    private void saveWidgets(final BobMerge merge)
+    {
+        final int unresolved = merge.getUnresolved();
+        if (unresolved > 0)
+        {
+            final Alert alert = new Alert(AlertType.INFORMATION, Messages.WidgetUnresolved.formatted(unresolved), ButtonType.OK);
+            alert.setTitle(Messages.MergeTool);
+            alert.setHeaderText(null);
+            DialogHelper.positionDialog(alert, layout, -200, -100);
+            alert.showAndWait();
+            return;
+        }
+        final byte[] content;
+        try
+        {
+            content = merge.getResult();
+        }
+        catch (Exception ex)
+        {
+            ExceptionDetailsErrorDialog.openError(layout, Messages.MergeTool, Messages.BobMergeUnsupported, ex);
+            return;
+        }
+        actions.run(Messages.MergeTool, git ->
+        {
+            Files.write(new File(git.getWorkTree(), path).toPath(), content);
+            git.stage(List.of(path));
+            tab.prepareToClose();
+            Platform.runLater(tab::close);
+        });
     }
 
     private static Node titled(final String title, final Node content)

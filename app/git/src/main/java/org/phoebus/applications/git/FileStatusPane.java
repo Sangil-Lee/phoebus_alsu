@@ -1,6 +1,8 @@
 package org.phoebus.applications.git;
 
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
@@ -62,6 +64,12 @@ class FileStatusPane extends BorderPane
         void unstageHunk(String path, int hunk);
         /** Discard one hunk of the unstaged diff, after asking user */
         void discardHunk(String path, int hunk);
+        /** Stage selected lines of the unstaged diff: Line indices by hunk */
+        void stageLines(String path, Map<Integer, Set<Integer>> lines);
+        /** Unstage selected lines of the staged diff */
+        void unstageLines(String path, Map<Integer, Set<Integer>> lines);
+        /** Discard selected lines of the unstaged diff, after asking user */
+        void discardLines(String path, Map<Integer, Set<Integer>> lines);
         /** @param ours Resolve conflict with our version, or theirs? */
         void resolveConflict(List<String> paths, boolean ours);
         /** Prompt for pattern and add it to .gitignore */
@@ -381,6 +389,18 @@ class FileStatusPane extends BorderPane
                 {
                     actions.unstageHunk(path, hunk);
                 }
+
+                @Override
+                public List<String> getLineLabels()
+                {
+                    return List.of(Messages.UnstageLines);
+                }
+
+                @Override
+                public void runLines(final int action, final Map<Integer, Set<Integer>> lines)
+                {
+                    actions.unstageLines(path, lines);
+                }
             };
         else if (entry.type() == ChangeType.MODIFIED)
             hunk_actions = new DiffPane.HunkActions()
@@ -398,6 +418,21 @@ class FileStatusPane extends BorderPane
                         actions.stageHunk(path, hunk);
                     else
                         actions.discardHunk(path, hunk);
+                }
+
+                @Override
+                public List<String> getLineLabels()
+                {
+                    return List.of(Messages.StageLines, Messages.DiscardLines);
+                }
+
+                @Override
+                public void runLines(final int action, final Map<Integer, Set<Integer>> lines)
+                {
+                    if (action == 0)
+                        actions.stageLines(path, lines);
+                    else
+                        actions.discardLines(path, lines);
                 }
             };
         else

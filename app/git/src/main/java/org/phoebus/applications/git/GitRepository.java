@@ -12,11 +12,13 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import org.eclipse.jgit.api.AddCommand;
@@ -48,6 +50,7 @@ import org.eclipse.jgit.dircache.DirCache;
 import org.eclipse.jgit.dircache.DirCacheEditor;
 import org.eclipse.jgit.dircache.DirCacheEntry;
 import org.eclipse.jgit.dircache.DirCacheIterator;
+import org.eclipse.jgit.lib.AbbreviatedObjectId;
 import org.eclipse.jgit.lib.BranchTrackingStatus;
 import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.FileMode;
@@ -57,6 +60,7 @@ import org.eclipse.jgit.lib.ObjectInserter;
 import org.eclipse.jgit.lib.ObjectReader;
 import org.eclipse.jgit.lib.PersonIdent;
 import org.eclipse.jgit.lib.ProgressMonitor;
+import org.eclipse.jgit.lib.RebaseTodoLine;
 import org.eclipse.jgit.lib.Ref;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.lib.RepositoryState;
@@ -1432,88 +1436,162 @@ public class GitRepository implements AutoCloseable
         return lines;
     }
 
+    /** Line of a hunk
+     *  @param type ' ', '-' or '+'
+     *  @param text Text including line end
+     *  @param selected Is the line selected?
+     *  @param no_newline Is it the last line of the file, without line end?
+     */
+    private record HunkLine(char type, byte[] text, boolean selected, boolean no_newline) {}
+
     /** Apply one hunk to file content
      *
      *  <p>The lines around the change must exactly match,
      *  otherwise the file changed since the diff was computed.
      *
+     *  <p>Only selected lines of the hunk can be applied:
+     *  A removed line that is not selected remains,
+     *  an added line that is not selected is skipped.
+     *  Selected added lines take the place of the first selected removed line
+     *  of the same block of changes, so replacing part of a block keeps the order of lines.
+     *  In reverse, the other way around.
+     *
      *  @param content Content of the file on the old side (or new side when reversed)
      *  @param hunk Hunk of a unified diff
      *  @param reverse Apply in reverse, i.e. undo the hunk?
+     *  @param selected Indices of lines in the hunk to apply, 0 being the line after the '@@' header,
+     *                  <code>null</code> to apply all
      *  @return Updated content
      *  @throws Exception if the hunk does not match the content
      */
-    static byte[] applyHunk(final byte[] content, final HunkHeader hunk, final boolean reverse) throws Exception
+    static byte[] applyHunk(final byte[] content, final HunkHeader hunk, final boolean reverse,
+                            final Set<Integer> selected) throws Exception
     {
         // Lines of the hunk without the '@@' header line
         final List<byte[]> body = splitLines(hunk.getBuffer(), hunk.getStartOffset(), hunk.getEndOffset());
         body.remove(0);
-        final List<byte[]> old_lines = new ArrayList<>(), new_lines = new ArrayList<>();
-        char last = ' ';
+        final List<HunkLine> lines = new ArrayList<>();
+        int index = -1;
         for (byte[] line : body)
         {
+            ++index;
             if (line.length == 0)
                 continue;
             final char type = (char) line[0];
-            final byte[] text = java.util.Arrays.copyOfRange(line, 1, line.length);
-            switch (type)
-            {
-            case ' ':
-                old_lines.add(text);
-                new_lines.add(text);
-                break;
-            case '-':
-                old_lines.add(text);
-                break;
-            case '+':
-                new_lines.add(text);
-                break;
-            case '\\':
-                // "\ No newline at end of file" applies to the preceding line
-                if (last == ' '  ||  last == '-')
-                    stripNewline(old_lines);
-                if (last == ' '  ||  last == '+')
-                    stripNewline(new_lines);
-                break;
-            default:
-                // End of hunk, for example the next 'diff --git'
-                break;
-            }
             if (type == ' '  ||  type == '-'  ||  type == '+')
-                last = type;
+                lines.add(new HunkLine(type, java.util.Arrays.copyOfRange(line, 1, line.length),
+                                       selected == null  ||  selected.contains(index), false));
+            else if (type == '\\'  &&  ! lines.isEmpty())
+            {
+                // "\ No newline at end of file" applies to the preceding line
+                final HunkLine last = lines.get(lines.size() - 1);
+                lines.set(lines.size() - 1, new HunkLine(last.type(), stripNewline(last.text()), last.selected(), true));
+            }
+            else
+                break;  // End of hunk, for example the next 'diff --git'
         }
 
-        final List<byte[]> from = reverse ? new_lines : old_lines;
-        final List<byte[]> to   = reverse ? old_lines : new_lines;
+        // Side that the content has, side that it gets
+        final char from_type = reverse ? '+' : '-';
+        final List<HunkLine> from = new ArrayList<>(), to = new ArrayList<>();
+        final List<HunkLine> block = new ArrayList<>();
+        for (HunkLine line : lines)
+        {
+            if (line.type() == ' ')
+            {
+                applyBlock(block, from_type, from, to);
+                from.add(line);
+                to.add(line);
+            }
+            else
+                block.add(line);
+        }
+        applyBlock(block, from_type, from, to);
+
         final int start = reverse ? hunk.getNewStartLine() : hunk.getOldImage().getStartLine();
         final int count = reverse ? hunk.getNewLineCount() : hunk.getOldImage().getLineCount();
         // For an empty range, the start is the line after which to insert
         final int position = count == 0 ? start : start - 1;
 
-        final List<byte[]> lines = splitLines(content, 0, content.length);
-        if (position < 0  ||  position + from.size() > lines.size())
+        final List<byte[]> file = splitLines(content, 0, content.length);
+        if (position < 0  ||  position + from.size() > file.size())
             throw new Exception("The file changed, refresh and try again");
         for (int i=0; i<from.size(); ++i)
-            if (! java.util.Arrays.equals(lines.get(position + i), from.get(i)))
+            if (! java.util.Arrays.equals(file.get(position + i), from.get(i).text()))
                 throw new Exception("The file changed, refresh and try again");
 
+        // Line end for a line that had none but is now followed by others
+        final byte[] newline = lines.stream().anyMatch(l -> endsWith(l.text(), "\r\n")) ? "\r\n".getBytes() : "\n".getBytes();
         final ByteArrayOutputStream out = new ByteArrayOutputStream(content.length);
         for (int i=0; i<position; ++i)
-            out.write(lines.get(i));
-        for (byte[] line : to)
-            out.write(line);
-        for (int i=position + from.size(); i<lines.size(); ++i)
-            out.write(lines.get(i));
+            out.write(file.get(i));
+        for (int i=0; i<to.size(); ++i)
+        {
+            out.write(to.get(i).text());
+            final boolean more = i < to.size() - 1  ||  position + from.size() < file.size();
+            if (to.get(i).no_newline()  &&  more)
+                out.write(newline);
+        }
+        for (int i=position + from.size(); i<file.size(); ++i)
+            out.write(file.get(i));
         return out.toByteArray();
     }
 
-    private static void stripNewline(final List<byte[]> lines)
+    /** Apply a block of changed lines
+     *  @param block Removed and added lines between context lines, cleared when done
+     *  @param from_type Type of lines that the content has: '-', or '+' when reversed
+     *  @param from Lines that the content has
+     *  @param to Lines that the content gets
+     */
+    private static void applyBlock(final List<HunkLine> block, final char from_type,
+                                   final List<HunkLine> from, final List<HunkLine> to)
     {
-        if (lines.isEmpty())
+        if (block.isEmpty())
             return;
-        final byte[] line = lines.get(lines.size() - 1);
+        // Existing lines that remain, and the new lines to insert where the first existing line is replaced
+        final List<HunkLine> remain = new ArrayList<>(), insert = new ArrayList<>();
+        int insert_at = -1;
+        for (HunkLine line : block)
+            if (line.type() == from_type)
+            {
+                from.add(line);
+                if (line.selected())
+                {
+                    if (insert_at < 0)
+                        insert_at = remain.size();
+                }
+                else
+                    remain.add(line);
+            }
+            else if (line.selected())
+                insert.add(line);
+        if (insert_at < 0)
+            insert_at = remain.size();
+        to.addAll(remain.subList(0, insert_at));
+        to.addAll(insert);
+        to.addAll(remain.subList(insert_at, remain.size()));
+        block.clear();
+    }
+
+    private static boolean endsWith(final byte[] text, final String end)
+    {
+        final byte[] bytes = end.getBytes();
+        if (text.length < bytes.length)
+            return false;
+        for (int i=0; i<bytes.length; ++i)
+            if (text[text.length - bytes.length + i] != bytes[i])
+                return false;
+        return true;
+    }
+
+    /** @param line Line
+     *  @return Line without trailing '\n'
+     */
+    private static byte[] stripNewline(final byte[] line)
+    {
         if (line.length > 0  &&  line[line.length - 1] == '\n')
-            lines.set(lines.size() - 1, java.util.Arrays.copyOf(line, line.length - 1));
+            return java.util.Arrays.copyOf(line, line.length - 1);
+        return line;
     }
 
     /** @param path File path
@@ -1586,11 +1664,51 @@ public class GitRepository implements AutoCloseable
      */
     public synchronized void stageHunk(final String path, final int hunk) throws Exception
     {
+        stageHunk(path, hunk, null);
+    }
+
+    /** @param path File path
+     *  @param hunk Index of the hunk in the unstaged diff of the file
+     *  @param lines Lines of the hunk, <code>null</code> for all
+     */
+    private void stageHunk(final String path, final int hunk, final Set<Integer> lines) throws Exception
+    {
         final Repository repository = git.getRepository();
         final DirCacheEntry entry = getIndexEntry(path);
         final byte[] diff = getRawDiff(path, new DirCacheIterator(repository.readDirCache()), new FileTreeIterator(repository));
-        final byte[] content = applyHunk(getContent(entry), getHunk(diff, hunk), false);
+        final byte[] content = applyHunk(getContent(entry), getHunk(diff, hunk), false, lines);
         writeIndex(path, content, entry == null ? FileMode.REGULAR_FILE : entry.getFileMode());
+    }
+
+    /** Stage selected lines of the unstaged changes
+     *  @param path File path
+     *  @param lines Line indices by hunk index, see {@link #applyHunk(byte[], HunkHeader, boolean, Set)}
+     */
+    public synchronized void stageLines(final String path, final Map<Integer, Set<Integer>> lines) throws Exception
+    {
+        // Last hunk first, so that the index of the remaining hunks does not change
+        for (int hunk : lines.keySet().stream().sorted(Comparator.reverseOrder()).toList())
+            stageHunk(path, hunk, lines.get(hunk));
+    }
+
+    /** Unstage selected lines of the staged changes
+     *  @param path File path
+     *  @param lines Line indices by hunk index
+     */
+    public synchronized void unstageLines(final String path, final Map<Integer, Set<Integer>> lines) throws Exception
+    {
+        for (int hunk : lines.keySet().stream().sorted(Comparator.reverseOrder()).toList())
+            unstageHunk(path, hunk, lines.get(hunk));
+    }
+
+    /** Discard selected lines of the unstaged changes
+     *  @param path File path
+     *  @param lines Line indices by hunk index
+     */
+    public synchronized void discardLines(final String path, final Map<Integer, Set<Integer>> lines) throws Exception
+    {
+        for (int hunk : lines.keySet().stream().sorted(Comparator.reverseOrder()).toList())
+            discardHunk(path, hunk, lines.get(hunk));
     }
 
     /** Unstage one hunk of the staged changes
@@ -1598,6 +1716,11 @@ public class GitRepository implements AutoCloseable
      *  @param hunk Index of the hunk in the staged diff of the file
      */
     public synchronized void unstageHunk(final String path, final int hunk) throws Exception
+    {
+        unstageHunk(path, hunk, null);
+    }
+
+    private void unstageHunk(final String path, final int hunk, final Set<Integer> lines) throws Exception
     {
         final Repository repository = git.getRepository();
         final DirCacheEntry entry = getIndexEntry(path);
@@ -1608,7 +1731,7 @@ public class GitRepository implements AutoCloseable
         {
             diff = getRawDiff(path, getHeadTree(reader), new DirCacheIterator(repository.readDirCache()));
         }
-        final byte[] content = applyHunk(getContent(entry), getHunk(diff, hunk), true);
+        final byte[] content = applyHunk(getContent(entry), getHunk(diff, hunk), true, lines);
         writeIndex(path, content, entry.getFileMode());
     }
 
@@ -1618,10 +1741,15 @@ public class GitRepository implements AutoCloseable
      */
     public synchronized void discardHunk(final String path, final int hunk) throws Exception
     {
+        discardHunk(path, hunk, null);
+    }
+
+    private void discardHunk(final String path, final int hunk, final Set<Integer> lines) throws Exception
+    {
         final Repository repository = git.getRepository();
         final byte[] diff = getRawDiff(path, new DirCacheIterator(repository.readDirCache()), new FileTreeIterator(repository));
         final Path file = new File(getWorkTree(), path).toPath();
-        final byte[] content = applyHunk(Files.readAllBytes(file), getHunk(diff, hunk), true);
+        final byte[] content = applyHunk(Files.readAllBytes(file), getHunk(diff, hunk), true, lines);
         Files.write(file, content);
     }
 
@@ -1955,7 +2083,8 @@ public class GitRepository implements AutoCloseable
     {
         return switch (result.getStatus())
         {
-            case STOPPED -> true;
+            // Conflicts, or 'edit' step of interactive rebase
+            case STOPPED, EDIT -> true;
             case OK, UP_TO_DATE, FAST_FORWARD, ABORTED -> false;
             case UNCOMMITTED_CHANGES -> throw new Exception("Rebase needs a clean work tree, commit or stash changes first: "
                                                             + result.getUncommittedChanges());
@@ -1980,7 +2109,153 @@ public class GitRepository implements AutoCloseable
      */
     public synchronized boolean continueRebase() throws Exception
     {
-        return checkRebase(git.rebase().setOperation(RebaseCommand.Operation.CONTINUE).call());
+        return checkRebase(interactive(git.rebase().setOperation(RebaseCommand.Operation.CONTINUE)).call());
+    }
+
+    /** Action of an interactive rebase step */
+    public enum RebaseAction
+    {
+        /** Use the commit */
+        PICK,
+        /** Use the commit, edit its message */
+        REWORD,
+        /** Use the commit, stop to amend it */
+        EDIT,
+        /** Combine with previous commit, edit the combined message */
+        SQUASH,
+        /** Combine with previous commit, keep the previous message */
+        FIXUP,
+        /** Remove the commit */
+        DROP
+    }
+
+    /** Step of an interactive rebase
+     *  @param action Action
+     *  @param commit Commit
+     */
+    public record RebaseStep(RebaseAction action, CommitInfo commit) {}
+
+    /** Edits commit messages of reword and squash steps, or <code>null</code> to keep them */
+    private volatile Function<String, String> message_editor = null;
+
+    /** @param editor Called with a commit message during an interactive rebase,
+     *                returns the edited message. Called on a background thread.
+     */
+    public void setRebaseMessageEditor(final Function<String, String> editor)
+    {
+        message_editor = editor;
+    }
+
+    /** @param command Rebase command
+     *  @return Command that uses the message editor
+     */
+    private RebaseCommand interactive(final RebaseCommand command)
+    {
+        final Function<String, String> editor = message_editor;
+        if (editor == null)
+            return command;
+        return command.runInteractively(new RebaseCommand.InteractiveHandler()
+        {
+            @Override
+            public void prepareSteps(final List<RebaseTodoLine> steps)
+            {
+                // Steps were prepared when the rebase started
+            }
+
+            @Override
+            public String modifyCommitMessage(final String message)
+            {
+                return editor.apply(message);
+            }
+        });
+    }
+
+    /** @param base Commit after which to start
+     *  @return Commits from base (exclusive) to HEAD, oldest first
+     *  @throws Exception if there is a merge in between, or base is not an ancestor of HEAD
+     */
+    public synchronized List<CommitInfo> getCommitsAfter(final String base) throws Exception
+    {
+        final Repository repository = git.getRepository();
+        final List<CommitInfo> result = new ArrayList<>();
+        try (RevWalk walk = new RevWalk(repository))
+        {
+            final RevCommit head = walk.parseCommit(repository.resolve(Constants.HEAD));
+            final RevCommit start = walk.parseCommit(ObjectId.fromString(base));
+            if (! walk.isMergedInto(start, head))
+                throw new Exception(Messages.RebaseNotAncestor);
+            walk.reset();
+            walk.markStart(head);
+            walk.markUninteresting(start);
+            for (RevCommit commit : walk)
+            {
+                if (commit.getParentCount() > 1)
+                    throw new Exception(Messages.RebaseMerges + ": " + commit.getShortMessage());
+                result.add(0, new CommitInfo(commit.name(), commit.getShortMessage(), commit.getAuthorIdent().getName(),
+                                             Instant.ofEpochSecond(commit.getCommitTime()), null));
+            }
+        }
+        return result;
+    }
+
+    /** @param ids Commit ids
+     *  @return Those commits that are on a remote branch, i.e. have been pushed
+     */
+    public synchronized Set<String> getPushedCommits(final Collection<String> ids) throws Exception
+    {
+        final Repository repository = git.getRepository();
+        final Set<String> pushed = new HashSet<>();
+        try (RevWalk walk = new RevWalk(repository))
+        {
+            final List<RevCommit> remotes = new ArrayList<>();
+            for (Ref ref : repository.getRefDatabase().getRefsByPrefix(Constants.R_REMOTES))
+                if (ref.getObjectId() != null)
+                    remotes.add(walk.parseCommit(ref.getObjectId()));
+            for (String id : ids)
+            {
+                final RevCommit commit = walk.parseCommit(ObjectId.fromString(id));
+                for (RevCommit remote : remotes)
+                    if (walk.isMergedInto(commit, remote))
+                    {
+                        pushed.add(id);
+                        break;
+                    }
+            }
+        }
+        return pushed;
+    }
+
+    /** Interactive rebase: Re-apply commits after a base with the given actions and order
+     *  @param base Commit after which the steps start
+     *  @param steps Steps, oldest first
+     *  @return <code>true</code> if it stopped with conflicts or for an 'edit' step
+     */
+    public synchronized boolean rebaseInteractive(final String base, final List<RebaseStep> steps) throws Exception
+    {
+        final Function<String, String> editor = message_editor;
+        final RebaseCommand command = git.rebase().setUpstream(base).runInteractively(new RebaseCommand.InteractiveHandler()
+        {
+            @Override
+            public void prepareSteps(final List<RebaseTodoLine> lines)
+            {
+                lines.clear();
+                for (RebaseStep step : steps)
+                {
+                    if (step.action() == RebaseAction.DROP)
+                        continue;
+                    lines.add(new RebaseTodoLine(RebaseTodoLine.Action.valueOf(step.action().name()),
+                                                 AbbreviatedObjectId.fromString(step.commit().id()),
+                                                 step.commit().message()));
+                }
+            }
+
+            @Override
+            public String modifyCommitMessage(final String message)
+            {
+                return editor == null ? message : editor.apply(message);
+            }
+        });
+        return checkRebase(command.call());
     }
 
     /** Skip the current commit of the rebase
@@ -1988,7 +2263,7 @@ public class GitRepository implements AutoCloseable
      */
     public synchronized boolean skipRebase() throws Exception
     {
-        return checkRebase(git.rebase().setOperation(RebaseCommand.Operation.SKIP).call());
+        return checkRebase(interactive(git.rebase().setOperation(RebaseCommand.Operation.SKIP)).call());
     }
 
     /** Abort rebase, restoring the original branch */

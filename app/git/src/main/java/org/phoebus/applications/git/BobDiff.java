@@ -116,7 +116,7 @@ class BobDiff
         return widgets;
     }
 
-    private static DocumentBuilder createBuilder() throws Exception
+    static DocumentBuilder createBuilder() throws Exception
     {
         // No external entities, no DTD
         final DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
@@ -155,7 +155,7 @@ class BobDiff
      *  @return Widgets directly below the element, or below its property elements (tabs, ...)
      *          but not below other widgets
      */
-    private static List<Element> findWidgets(final Element parent)
+    static List<Element> findWidgets(final Element parent)
     {
         final List<Element> result = new ArrayList<>();
         for (Node node = parent.getFirstChild(); node != null; node = node.getNextSibling())
@@ -170,7 +170,7 @@ class BobDiff
     }
 
     /** @return Text of the first direct child element with that name, empty if none */
-    private static String getText(final Element parent, final String name)
+    static String getText(final Element parent, final String name)
     {
         for (Node node = parent.getFirstChild(); node != null; node = node.getNextSibling())
             if (node instanceof Element element  &&  name.equals(element.getTagName()))
@@ -195,7 +195,7 @@ class BobDiff
         return properties;
     }
 
-    private static boolean hasWidgets(final Element element)
+    static boolean hasWidgets(final Element element)
     {
         return ! findWidgets(element).isEmpty();
     }
@@ -203,7 +203,7 @@ class BobDiff
     /** @param property Property element
      *  @return Text value, or compact XML for structured values, without nested widgets
      */
-    private static String getValue(final Element property) throws Exception
+    static String getValue(final Element property) throws Exception
     {
         boolean structured = property.getAttributes().getLength() > 0;
         for (Node node = property.getFirstChild(); node != null; node = node.getNextSibling())

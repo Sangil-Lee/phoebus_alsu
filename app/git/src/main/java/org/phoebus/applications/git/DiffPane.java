@@ -4,6 +4,10 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
@@ -22,7 +26,10 @@ import javafx.geometry.Pos;
 import javafx.scene.control.CheckBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListCell;
+import javafx.scene.control.ContextMenu;
 import javafx.scene.control.ListView;
+import javafx.scene.control.MenuItem;
+import javafx.scene.control.SelectionMode;
 import javafx.scene.input.MouseButton;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
@@ -49,6 +56,20 @@ class DiffPane extends BorderPane
          *  @param hunk Index of the hunk in the diff
          */
         void run(int action, int hunk);
+
+        /** @return Menu labels for actions on selected lines, empty if none */
+        default List<String> getLineLabels()
+        {
+            return List.of();
+        }
+
+        /** @param action Index of the action
+         *  @param lines Selected lines: Index of line in its hunk, 0 for the line after the '@@' header, by hunk index
+         */
+        default void runLines(final int action, final Map<Integer, Set<Integer>> lines)
+        {
+            // No line actions
+        }
     }
 
     /** Side-by-side mode, shared by all diff panes */
@@ -110,6 +131,29 @@ class DiffPane extends BorderPane
         this.repo = repo;
         this.on_error = on_error;
         unified.setCellFactory(view -> new DiffLineCell(() -> hunk_actions));
+        // Select lines to stage, unstage, discard them
+        unified.getSelectionModel().setSelectionMode(SelectionMode.MULTIPLE);
+        final ContextMenu line_menu = new ContextMenu();
+        line_menu.setOnShowing(event ->
+        {
+            line_menu.getItems().clear();
+            final HunkActions actions = hunk_actions;
+            final Map<Integer, Set<Integer>> selected = getSelectedLines();
+            if (actions == null)
+                return;
+            final List<String> labels = actions.getLineLabels();
+            for (int i=0; i<labels.size(); ++i)
+            {
+                final int action = i;
+                final MenuItem item = new MenuItem(labels.get(i));
+                item.setDisable(selected.isEmpty());
+                item.setOnAction(e -> actions.runLines(action, selected));
+                line_menu.getItems().add(item);
+            }
+        });
+        // Menu needs at least one item to show
+        line_menu.getItems().add(new MenuItem());
+        unified.setContextMenu(line_menu);
         split.setCellFactory(view -> new SideBySideCell());
         widgets.setCellFactory(view -> new WidgetChangeCell());
         // Double-click on a widget selects it in the display editor
@@ -271,6 +315,29 @@ class DiffPane extends BorderPane
                     return;
             }
         });
+    }
+
+    /** @return Selected added or removed lines: Index in hunk by hunk index */
+    Map<Integer, Set<Integer>> getSelectedLines()
+    {
+        final Map<Integer, Set<Integer>> result = new TreeMap<>();
+        final List<Integer> selected = unified.getSelectionModel().getSelectedIndices();
+        final List<String> shown = unified.getItems();
+        int hunk = -1, header = -1;
+        for (int i=0; i<shown.size(); ++i)
+        {
+            final String line = shown.get(i);
+            if (line.startsWith("@@"))
+            {
+                ++hunk;
+                header = i;
+            }
+            else if (hunk >= 0  &&  selected.contains(i)  &&
+                     (line.startsWith("+")  ||  line.startsWith("-"))  &&
+                     ! line.startsWith("+++")  &&  ! line.startsWith("---"))
+                result.computeIfAbsent(hunk, h -> new TreeSet<>()).add(i - header - 1);
+        }
+        return result;
     }
 
     /** Clear the diff, dropping pending results */

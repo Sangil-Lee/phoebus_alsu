@@ -54,6 +54,8 @@ class HistoryPane extends BorderPane
         void logbook(CommitInfo commit);
         /** Reset current branch to commit, after asking for the mode */
         void reset(CommitInfo commit);
+        /** Interactive rebase of the commits after this one */
+        void interactiveRebase(CommitInfo commit);
         /** Read more commits */
         void loadMore();
         /** Show the uncommitted changes in the file status */
@@ -174,6 +176,8 @@ class HistoryPane extends BorderPane
         revert.setOnAction(event -> actions.revert(getSelected()));
         final MenuItem reset = new MenuItem(Messages.Reset);
         reset.setOnAction(event -> actions.reset(getSelected()));
+        final MenuItem rebase = new MenuItem(Messages.InteractiveRebaseMenu);
+        rebase.setOnAction(event -> actions.interactiveRebase(getSelected()));
         final MenuItem logbook = new MenuItem(Messages.Logbook);
         logbook.setOnAction(event -> actions.logbook(getSelected()));
         final MenuItem copy = new MenuItem(Messages.CopyId);
@@ -192,7 +196,7 @@ class HistoryPane extends BorderPane
             git_actions.pickRevision(Messages.CompareWithOther, other -> git_actions.compare(other, selected, null));
         });
         final ContextMenu menu = new ContextMenu(tag, branch, new SeparatorMenuItem(),
-                                                 cherry_pick, revert, reset, new SeparatorMenuItem(),
+                                                 cherry_pick, revert, reset, rebase, new SeparatorMenuItem(),
                                                  compare_work, compare_other, new SeparatorMenuItem(), logbook, copy);
         menu.setOnShowing(event ->
         {

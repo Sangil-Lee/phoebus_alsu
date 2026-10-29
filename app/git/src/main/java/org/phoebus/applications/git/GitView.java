@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.logging.Level;
@@ -433,6 +434,25 @@ public class GitView implements AppInstance
         }
 
         @Override
+        public void stageLines(final String path, final Map<Integer, Set<Integer>> lines)
+        {
+            runAndRefresh(Messages.StageLines, git -> git.stageLines(path, lines));
+        }
+
+        @Override
+        public void unstageLines(final String path, final Map<Integer, Set<Integer>> lines)
+        {
+            runAndRefresh(Messages.UnstageLines, git -> git.unstageLines(path, lines));
+        }
+
+        @Override
+        public void discardLines(final String path, final Map<Integer, Set<Integer>> lines)
+        {
+            if (confirm(Messages.DiscardLines, Messages.DiscardLinesConfirm + "\n" + path))
+                runAndRefresh(Messages.DiscardLines, git -> git.discardLines(path, lines));
+        }
+
+        @Override
         public void resolveConflict(final List<String> paths, final boolean ours)
         {
             runAndRefresh(ours ? Messages.ResolveOurs : Messages.ResolveTheirs, git ->
@@ -553,6 +573,38 @@ public class GitView implements AppInstance
         public void reset(final CommitInfo commit)
         {
             GitView.this.reset(commit);
+        }
+
+        @Override
+        public void interactiveRebase(final CommitInfo commit)
+        {
+            final GitRepository current = repo;
+            if (current == null)
+                return;
+            schedule(Messages.InteractiveRebase, monitor ->
+            {
+                try
+                {
+                    final List<CommitInfo> commits = current.getCommitsAfter(commit.id());
+                    final Set<String> pushed = current.getPushedCommits(commits.stream().map(CommitInfo::id).toList());
+                    Platform.runLater(() ->
+                    {
+                        if (commits.isEmpty())
+                        {
+                            showError(Messages.InteractiveRebase, new Exception(Messages.RebaseNothing));
+                            return;
+                        }
+                        new InteractiveRebaseDialog(layout, commits, pushed)
+                            .showAndWait()
+                            .ifPresent(steps -> runMayConflict(Messages.InteractiveRebase,
+                                                               git -> git.rebaseInteractive(commit.id(), steps)));
+                    });
+                }
+                catch (Exception ex)
+                {
+                    showError(Messages.InteractiveRebase, ex);
+                }
+            });
         }
 
         @Override
@@ -1502,6 +1554,8 @@ public class GitView implements AppInstance
             try
             {
                 final GitRepository new_repo = new GitRepository(directory);
+                // Interactive rebase asks for messages of 'reword' and 'squash' steps
+                new_repo.setRebaseMessageEditor(message -> InteractiveRebaseDialog.editMessage(layout, message));
                 log_count = GitApp.log_count;
                 final GitRepository old = repo;
                 repo = new_repo;
@@ -1673,15 +1727,20 @@ public class GitView implements AppInstance
         runAndRefresh(name, git ->
         {
             if (operation.run(git))
+            {
+                // Stopped for conflicts, or for an 'edit' step of an interactive rebase
+                final boolean conflicts = git.getStatus().unstaged().stream().anyMatch(e -> e.type() == ChangeType.CONFLICT);
                 Platform.runLater(() ->
                 {
                     sidebar.selectFileStatus();
-                    final Alert alert = new Alert(AlertType.INFORMATION, Messages.ConflictsInfo, ButtonType.OK);
+                    final Alert alert = new Alert(AlertType.INFORMATION, conflicts ? Messages.ConflictsInfo : Messages.RebaseEditInfo,
+                                                  ButtonType.OK);
                     alert.setTitle(name);
                     alert.setHeaderText(null);
                     DialogHelper.positionDialog(alert, layout, -200, -100);
                     alert.show();
                 });
+            }
         });
     }
 
