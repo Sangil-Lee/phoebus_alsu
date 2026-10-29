@@ -90,3 +90,47 @@
 2. **JavaFX Windows용 jar 내려받기 허용**: Maven Central에서 `javafx-*-win.jar`(수십 MB)를 받는다. 오프라인 설치 번들에도 넣을지.
 3. **사내 환경 항목 포함 여부**: 네트워크 드라이브(W11), 사내 Git 서버 SSH/HTTPS(W6·W7)는 사내망이 필요하다.
 4. **운영 기준**: 운영 PC의 Windows 버전과 `core.autocrlf` 정책. 정책이 있으면 그 조합을 합격 기준으로 삼는다.
+
+## 8. 단계 0~3 결과 (2026-10-29, `autocrlf=true` 기준)
+
+환경: 이 PC의 Windows 11, JDK 17.0.6, Git for Windows 2.52(시스템 `autocrlf=true`), JavaFX 21.0.7 Windows용.
+WSL에서 Windows JVM을 실행. 테스트 폴더 `C:\Users\JEM\phoebus-git-test`.
+
+| 검증 | 결과 |
+|---|---|
+| 단위 테스트 106 (`autocrlf=true`) | 69 통과. 실패 37 = 임시 폴더 삭제 실패 18(테스트 환경), `autocrlf` 영향 10, Windows 고유 9 |
+| 단위 테스트 106 (시스템 설정 끔) | 79 통과. 임시 폴더 18, Windows 고유 9 |
+| E2E 73 (시스템 설정 끔) | 70 통과. 70·71은 실행기 경로 비교 문제, 44(stash diff 표시)는 원인 확인 필요 |
+| 연계 21, 로그북 12 | 모두 통과 |
+| EGit 동등 86 (시스템 설정 끔) | 모두 통과 |
+| Windows 시나리오 23 (`autocrlf=true`) | 14 통과, 9 실패 |
+
+통과한 Windows 항목: 한글 파일 이름·커밋 메시지·작성자, 260자 넘는 경로, 대소문자만 바꾼 이름 변경,
+실행 비트, 감시 중인 폴더를 지우는 checkout(명령행·Git 탭), CRLF 파일의 줄 단위 stage, index까지 되돌리기.
+
+### 찾은 결함
+
+| # | 결함 | 확인 | 중요도 |
+|---|---|---|---|
+| D1 | CRLF 작업 트리에서 *Hunk 버리기*, *선택한 줄 버리기* 실패 ("파일이 바뀌었습니다") | WS-01c, WS-01d | 높음 |
+| D2 | *되돌리기(작업 트리만)* 가 LF로 써서 파일이 바뀐 것으로 나옴 | WS-02a | 높음 |
+| D3 | 병합 도구 결과가 LF, 위젯 병합 결과는 줄바꿈이 섞임 (XML 직렬화가 시스템 줄바꿈을 씀) | WS-03a, WS-03b, BobMergeTest 6 | 높음 |
+| D4 | LF patch를 CRLF 작업 트리에 적용 못함 | WS-04 | 중간 |
+| D5 | 작업 트리와 비교할 때 CRLF 파일의 이름 변경을 못 찾음 | WS-02c, F2-12 | 중간 |
+| D6 | *이 버전 열기* 임시 폴더가 읽기 전용이라 종료 시 지워지지 않음 | WS-05, testExport | 중간 |
+| D7 | 대소문자가 다른 경로로 *Git에서 보기* 를 하면 같은 저장소의 Git 탭을 새로 엶 | WS-08 | 낮음 |
+| D8 | ignore된 폴더 안의 변경에도 자동 새로 고침이 일어남 | RepositoryWatcherTest | 낮음 (성능) |
+| D9 | 커밋 전 검사가 `/로 시작하는 경로` 를 상대 경로로 판단 | CommitCheckTest | 낮음 |
+| D10 | E2E 44: stash를 고르면 가운데 diff가 안 보임 (API는 정상) | E2E 44 | 확인 필요 |
+
+테스트 환경 문제(앱 결함 아님): JGit이 pack 파일을 열어 둔 채라 JUnit 임시 폴더 삭제 실패(18),
+실행기의 LF 가정과 `/` 경로 조립. 단계 5에서 테스트·실행기를 함께 고친다.
+
+미실시: WS-13(사내 SSH/HTTPS), WS-15(성능), `autocrlf` input/false 조합.
+
+### 검증 중 사고
+
+parity 단계 5의 Git 설정 시나리오가 실제 `C:\Users\JEM\.gitconfig` 를 바꿨다. Windows의 JGit은 `user.home` 이 아니라
+`HOME`/`%USERPROFILE%` 로 사용자 설정을 찾기 때문이다. 추가된 `[core] autocrlf = input` 은 되돌렸고,
+`user.name`/`user.email` 은 원래 값을 알 수 없어 사용자가 직접 복구해야 한다.
+이후 Windows 실행은 `HOME` 을 테스트 폴더로 지정해 격리했다.
