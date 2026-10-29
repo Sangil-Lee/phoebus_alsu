@@ -343,3 +343,23 @@ diff에서 `+`/`-` 줄을 여러 개 선택(Shift·Ctrl)하고 우클릭 *선택
 3. **`.bob` 병합 정책** (F1): 위젯 병합 결과를 자동 반영할 범위(한쪽만 바뀐 속성 자동 반영을 기본으로 할지),
    서식(들여쓰기·속성 순서)을 ours 기준으로 유지하는 방식에 동의하는지.
 4. **진행 순서**: 위 단계 순서대로 할지, 특정 기능을 앞당길지.
+
+## 8. 구현 결과 (2026-10-29)
+
+| # | 상태 | 구현 내용과 설계와 다른 점 |
+|---|---|---|
+| 0 | 완료 | `Revision`, `GitRepository`의 `resolve/compare/getDiff/getContent/getVersions/restore/export`. `GitView` 전체 분리 대신 비교·되돌리기·병합 도구 열기를 `GitActions`로 분리하고, 새 기능은 별도 클래스로 둠 (기존 검증된 흐름 유지) |
+| F1 | 완료 | `MergeModel`/`MergeView` 텍스트 3-way 병합. `.bob`은 `BobMerge`로 위젯·속성 단위 병합(위젯 단위 탭이 먼저, 텍스트 탭도 제공). 상대 쪽의 위젯 순서 변경은 반영하지 않음(ours 순서 유지). 위젯을 담은 속성(탭 구성)이 양쪽에서 바뀌면 텍스트 병합만 제공 |
+| F2 | 완료 | `CompareView`, 파일 상태·이력·커밋 파일·파일 이력·사이드바 메뉴, 되돌리기(작업 트리만 / index까지), 이 버전 열기(폴더째 읽기 전용 임시 폴더, 종료 시 삭제). rename 감지 기준을 git 명령과 같은 50%로 맞춤 |
+| F3 | 완료 | core-ui `FileDecorator`/`FileDecoration` SPI, File Browser `FileTreeCell`·컨트롤러 변경, `GitFileDecorator`. 표시는 이름 앞 글자와 색(겹침 그림 SPI는 있으나 Git은 사용 안 함). 상태 읽기가 저장소를 바꾸지 않음을 확인하고 변경마다 다시 읽음 |
+| F4 | 완료 | Display Editor 우클릭 메뉴에 `SelectionService`/`ContextMenuHelper` 연결, `getDisplayEditor()` 접근자. HEAD 대비 바뀐 위젯 선택(저장 안 한 변경 포함, HEAD는 ModelReader→ModelWriter로 정규화해 비교), 위젯 이력, 화면 이력, HEAD와 비교, 위젯 diff 더블클릭으로 편집기 위젯 선택 |
+| F5 | 완료 | `InteractiveRebaseDialog`, pick/reword/edit/squash/fixup/drop, 순서 변경, push된 커밋 경고, 첫 단계 squash 거부, 메시지 편집 창. merge 커밋이 있으면 시작하지 않음 |
+| F6 | 완료 | diff 여러 줄 선택 → stage/unstage/버리기. git add -p 규칙에서 한 단계 나아가, 바뀐 덩어리 안에서 고른 추가 줄을 고른 삭제 줄 자리에 넣어 줄 순서 유지 |
+| F7 | 완료 | 커밋 → format-patch(mbox, `git am` 호환 확인), 커밋 안 한 변경 → unified diff, Patch 적용(미리보기, JGit `ApplyCommand`) |
+| F8 | 완료 | 사이드바 SUBMODULES, 초기화·업데이트, Git 탭에서 열기, Clone 시 포함. `git submodule deinit` 뒤 남은 `.git/modules` 재연결 (JGit 그대로는 실패) |
+| F9 | 보류 | `org.eclipse.jgit.gpg.bc`가 오프라인 저장소에 없음. 의존성 결정 후 |
+| F10 | 보류 | `org.eclipse.jgit.ssh.apache.agent`가 오프라인 저장소에 없음. 의존성 결정 후 |
+| F11 | 완료 | 원격 저장소 설정 창(fetch/push URL, refspec, prune, 태그). fetch가 원격별 prune·태그 설정을 따름. prune 설정이 없으면 이전처럼 정리 |
+
+검증: 단위 테스트 102개(신규 38개), UI 실행기 단계별 시나리오 76개(F1·F2 31, F3·F4 15, 단계 3 15, 단계 4 15),
+기존 E2E 73·연계 21·검사/로그북 12 회귀.
