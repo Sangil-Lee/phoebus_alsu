@@ -37,6 +37,7 @@ import org.phoebus.ui.application.PhoebusApplication;
 import org.phoebus.ui.dialog.DialogHelper;
 import org.phoebus.ui.javafx.ImageCache;
 import org.phoebus.ui.spi.ContextMenuEntry;
+import org.phoebus.ui.spi.FileDecorator;
 
 import java.io.File;
 import java.net.URI;
@@ -66,6 +67,9 @@ public class FileBrowserController {
     Button browse;
     @FXML
     TreeTableView<FileInfo> treeView;
+
+    /** Re-draws the files when their decorations change */
+    private final Runnable decorations_changed = () -> Platform.runLater(() -> treeView.refresh());
 
     private final MenuItem open = new MenuItem(Messages.Open, ImageCache.getImageView(PhoebusApplication.class, "/icons/fldr_obj.png"));
     private final Menu openWith = new Menu(Messages.OpenWith, ImageCache.getImageView(PhoebusApplication.class, "/icons/fldr_obj.png"));
@@ -218,6 +222,9 @@ public class FileBrowserController {
         name_col.setPrefWidth(200);
         name_col.setCellValueFactory(p -> new ReadOnlyObjectWrapper<>(p.getValue().getValue().file));
         name_col.setCellFactory(info -> new FileTreeCell());
+        // Update decorations of shown files when they change
+        for (FileDecorator decorator : FileDecorator.getDecorators())
+            decorator.addListener(decorations_changed);
         name_col.setComparator(FileTreeItem.fileTreeItemComparator);
         treeView.getColumns().add(name_col);
 
@@ -507,6 +514,8 @@ public class FileBrowserController {
      * Call when no longer needed
      */
     public void shutdown() {
+        for (FileDecorator decorator : FileDecorator.getDecorators())
+            decorator.removeListener(decorations_changed);
         monitor.shutdown();
     }
 

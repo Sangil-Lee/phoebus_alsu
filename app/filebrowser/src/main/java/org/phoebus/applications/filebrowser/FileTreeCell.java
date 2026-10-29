@@ -6,6 +6,8 @@ import javafx.scene.control.TreeItem;
 import javafx.scene.control.TreeTableCell;
 import javafx.scene.control.TreeTableView;
 import javafx.scene.image.Image;
+import javafx.geometry.Pos;
+import javafx.scene.Node;
 import javafx.scene.image.ImageView;
 import javafx.scene.input.ClipboardContent;
 import javafx.scene.input.Dragboard;
@@ -15,6 +17,7 @@ import javafx.scene.layout.Border;
 import javafx.scene.layout.BorderStroke;
 import javafx.scene.layout.BorderStrokeStyle;
 import javafx.scene.layout.CornerRadii;
+import javafx.scene.layout.StackPane;
 import javafx.scene.paint.Color;
 import org.phoebus.framework.jobs.JobManager;
 import org.phoebus.framework.spi.AppDescriptor;
@@ -24,6 +27,8 @@ import org.phoebus.ui.application.ApplicationLauncherService;
 import org.phoebus.ui.dialog.ExceptionDetailsErrorDialog;
 import org.phoebus.ui.javafx.ImageCache;
 import org.phoebus.ui.javafx.PlatformInfo;
+import org.phoebus.ui.spi.FileDecoration;
+import org.phoebus.ui.spi.FileDecorator;
 
 import java.io.File;
 import java.net.URI;
@@ -211,24 +216,49 @@ final class FileTreeCell extends TreeTableCell<FileInfo, File> {
         if (empty || file == null || getTableRow() == null || getTableRow().getTreeItem() == null) {
             setText(null);
             setGraphic(null);
+            setStyle(null);
         } else {
             if (getTableRow().getTreeItem().getParent() == null) {
                 // Root (actually hidden, so this is never called)
                 setText(file.getAbsolutePath());
             } else {
+                // Decoration from version control etc.
+                final FileDecoration decoration = FileDecorator.decorate(file);
                 if (file.isDirectory())
-                    setGraphic(new ImageView(folder_icon));
+                    setGraphic(decorate(new ImageView(folder_icon), decoration));
                 else
                 {
-                    setGraphic(new ImageView(file_icon));
-                    JobManager.schedule(Messages.LookupJobName, monitor -> lookup_icon(file));
+                    setGraphic(decorate(new ImageView(file_icon), decoration));
+                    JobManager.schedule(Messages.LookupJobName, monitor -> lookup_icon(file, decoration));
                 }
-                setText(file.getName());
+                if (decoration == null)
+                {
+                    setText(file.getName());
+                    setStyle(null);
+                }
+                else
+                {
+                    setText(decoration.prefix() + file.getName() + decoration.suffix());
+                    setStyle(decoration.style());
+                }
             }
         }
     }
 
-    private void lookup_icon(final File file)
+    /** @param icon File icon
+     *  @param decoration Decoration, may be <code>null</code>
+     *  @return Icon with overlay of the decoration
+     */
+    private static Node decorate(final ImageView icon, final FileDecoration decoration)
+    {
+        if (decoration == null  ||  decoration.overlay() == null)
+            return icon;
+        final ImageView overlay = new ImageView(decoration.overlay());
+        StackPane.setAlignment(overlay, Pos.BOTTOM_RIGHT);
+        return new StackPane(icon, overlay);
+    }
+
+    private void lookup_icon(final File file, final FileDecoration decoration)
     {
         final URI resource = ResourceParser.getURI(file);
         final AppDescriptor app = ApplicationLauncherService.findApplication(resource, false, null);
@@ -239,7 +269,7 @@ final class FileTreeCell extends TreeTableCell<FileInfo, File> {
             return;
         final ImageView icon = ImageCache.getImageView(icon_url);
         if (icon != null)
-            Platform.runLater(() -> setGraphic(icon));
+            Platform.runLater(() -> setGraphic(decorate(icon, decoration)));
     }
 
     /**

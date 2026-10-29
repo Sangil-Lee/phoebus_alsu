@@ -38,11 +38,13 @@ import org.csstudio.display.builder.representation.javafx.FilenameSupport;
 import org.csstudio.display.builder.representation.javafx.JFXRepresentation;
 import org.phoebus.framework.jobs.JobMonitor;
 import org.phoebus.framework.persistence.Memento;
+import org.phoebus.framework.selection.SelectionService;
 import org.phoebus.framework.spi.AppDescriptor;
 import org.phoebus.framework.spi.AppInstance;
 import org.phoebus.framework.spi.AppResourceDescriptor;
 import org.phoebus.framework.util.ResourceParser;
 import org.phoebus.ui.application.ApplicationLauncherService;
+import org.phoebus.ui.application.ContextMenuHelper;
 import org.phoebus.ui.dialog.DialogHelper;
 import org.phoebus.ui.docking.DockItemWithInput;
 import org.phoebus.ui.docking.DockPane;
@@ -261,6 +263,17 @@ public class DisplayEditorInstance implements AppInstance
                                        show_tree,
                                        show_props);
 
+            // Entries of other applications for the selected widgets, or the display
+            if (model != null)
+            {
+                SelectionService.getInstance().setSelection(DisplayEditorApplication.NAME,
+                                                            selection.isEmpty() ? List.of(model) : selection);
+                final SeparatorMenuItem separator = new SeparatorMenuItem();
+                menu.getItems().add(separator);
+                if (! ContextMenuHelper.addSupportedEntries(this::raise, menu))
+                    menu.getItems().remove(separator);
+            }
+
             menu.show(editor_gui.getDisplayEditor().getContextMenuNode().getScene().getWindow(),
                     contextMenuEvent.getScreenX(), contextMenuEvent.getScreenY());
 
@@ -348,6 +361,12 @@ public class DisplayEditorInstance implements AppInstance
     EditorGUI getEditorGUI()
     {
         return editor_gui;
+    }
+
+    /** @return Display editor, for example to select widgets */
+    public DisplayEditor getDisplayEditor()
+    {
+        return editor_gui.getDisplayEditor();
     }
 
     void loadDisplay(final URI resource)
