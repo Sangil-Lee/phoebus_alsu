@@ -19,6 +19,7 @@ import javafx.scene.control.CheckBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.ContextMenu;
 import javafx.scene.control.MenuItem;
+import javafx.scene.control.SelectionMode;
 import javafx.scene.control.SeparatorMenuItem;
 import javafx.scene.control.SplitPane;
 import javafx.scene.control.TableColumn;
@@ -48,16 +49,18 @@ class HistoryPane extends BorderPane
         void createTag(String commit);
         /** @param commit Commit id where the branch starts */
         void createBranch(String commit);
-        void cherryPick(CommitInfo commit);
-        void revert(CommitInfo commit);
-        /** Create logbook entry for the commit */
-        void logbook(CommitInfo commit);
+        /** @param commits Commits to cherry-pick, newest first */
+        void cherryPick(List<CommitInfo> commits);
+        /** @param commits Commits to revert, newest first */
+        void revert(List<CommitInfo> commits);
+        /** Create logbook entry for the commits, newest first */
+        void logbook(List<CommitInfo> commits);
         /** Reset current branch to commit, after asking for the mode */
         void reset(CommitInfo commit);
         /** Interactive rebase of the commits after this one */
         void interactiveRebase(CommitInfo commit);
-        /** Save the commit as a patch file */
-        void createPatch(CommitInfo commit);
+        /** Save the commits as a patch file */
+        void createPatch(List<CommitInfo> commits);
         /** Read more commits */
         void loadMore();
         /** Show the uncommitted changes in the file status */
@@ -123,6 +126,8 @@ class HistoryPane extends BorderPane
         for (TableColumn<CommitInfo, ?> col : history.getColumns())
             col.setSortable(false);
         history.setFixedCellSize(24);
+        // Several commits for cherry-pick, patch, logbook, comparing two
+        history.getSelectionModel().setSelectionMode(SelectionMode.MULTIPLE);
         history.setContextMenu(createContextMenu(actions));
         history.getSelectionModel().selectedItemProperty().addListener((prop, old, commit) ->
         {
@@ -135,7 +140,7 @@ class HistoryPane extends BorderPane
         history.setOnMouseClicked(event ->
         {
             if (event.getButton() == MouseButton.PRIMARY  &&  event.getClickCount() == 2  &&
-                isUncommitted(getSelected()))
+                isUncommitted(history.getSelectionModel().getSelectedItem()))
                 actions.showFileStatus();
         });
 
@@ -173,23 +178,30 @@ class HistoryPane extends BorderPane
         final MenuItem branch = new MenuItem(Messages.CreateBranchHere);
         branch.setOnAction(event -> actions.createBranch(getSelected().id()));
         final MenuItem cherry_pick = new MenuItem(Messages.CherryPick);
-        cherry_pick.setOnAction(event -> actions.cherryPick(getSelected()));
+        cherry_pick.setOnAction(event -> actions.cherryPick(getSelectedCommits()));
         final MenuItem revert = new MenuItem(Messages.Revert);
-        revert.setOnAction(event -> actions.revert(getSelected()));
+        revert.setOnAction(event -> actions.revert(getSelectedCommits()));
         final MenuItem reset = new MenuItem(Messages.Reset);
         reset.setOnAction(event -> actions.reset(getSelected()));
         final MenuItem rebase = new MenuItem(Messages.InteractiveRebaseMenu);
         rebase.setOnAction(event -> actions.interactiveRebase(getSelected()));
         final MenuItem logbook = new MenuItem(Messages.Logbook);
-        logbook.setOnAction(event -> actions.logbook(getSelected()));
+        logbook.setOnAction(event -> actions.logbook(getSelectedCommits()));
         final MenuItem patch = new MenuItem(Messages.CreatePatch);
-        patch.setOnAction(event -> actions.createPatch(getSelected()));
+        patch.setOnAction(event -> actions.createPatch(getSelectedCommits()));
         final MenuItem copy = new MenuItem(Messages.CopyId);
         copy.setOnAction(event ->
         {
             final ClipboardContent content = new ClipboardContent();
-            content.putString(getSelected().id());
+            content.putString(String.join("\n", getSelectedCommits().stream().map(CommitInfo::id).toList()));
             Clipboard.getSystemClipboard().setContent(content);
+        });
+        // Two selected commits: Compare older with newer
+        final MenuItem compare_two = new MenuItem(Messages.CompareCommits);
+        compare_two.setOnAction(event ->
+        {
+            final List<CommitInfo> selected = getSelectedCommits();
+            git_actions.compare(toRevision(selected.get(1)), toRevision(selected.get(0)), null);
         });
         final MenuItem compare_work = new MenuItem(Messages.CompareWithWorkTree);
         compare_work.setOnAction(event -> git_actions.compare(toRevision(getSelected()), Revision.WORK_TREE, null));
@@ -201,13 +213,17 @@ class HistoryPane extends BorderPane
         });
         final ContextMenu menu = new ContextMenu(tag, branch, new SeparatorMenuItem(),
                                                  cherry_pick, revert, reset, rebase, new SeparatorMenuItem(),
-                                                 compare_work, compare_other, new SeparatorMenuItem(), patch, logbook, copy);
+                                                 compare_work, compare_other, compare_two, new SeparatorMenuItem(),
+                                                 patch, logbook, copy);
+        // Operations on one commit, or on any number of them
+        final List<MenuItem> single = List.of(tag, branch, reset, rebase, compare_work, compare_other);
         menu.setOnShowing(event ->
         {
             // Commit operations need an actual commit
-            final CommitInfo selected = getSelected();
-            final boolean none = selected == null  ||  isUncommitted(selected);
-            menu.getItems().forEach(item -> item.setDisable(none));
+            final int count = getSelectedCommits().size();
+            menu.getItems().forEach(item -> item.setDisable(count == 0));
+            single.forEach(item -> item.setDisable(count != 1));
+            compare_two.setDisable(count != 2);
         });
         return menu;
     }
@@ -222,7 +238,18 @@ class HistoryPane extends BorderPane
 
     private CommitInfo getSelected()
     {
-        return history.getSelectionModel().getSelectedItem();
+        final List<CommitInfo> selected = getSelectedCommits();
+        return selected.isEmpty() ? null : selected.get(0);
+    }
+
+    /** @return Selected commits, newest first, without the 'uncommitted changes' row */
+    List<CommitInfo> getSelectedCommits()
+    {
+        return history.getSelectionModel().getSelectedIndices().stream()
+                      .sorted()
+                      .map(history.getItems()::get)
+                      .filter(commit -> ! isUncommitted(commit))
+                      .toList();
     }
 
     /** @param commits Commits to show
@@ -241,7 +268,7 @@ class HistoryPane extends BorderPane
         final List<String> new_signature = getSignature(commits, current_branch, changed);
         if (new_signature.equals(signature))
         {
-            if (isUncommitted(getSelected()))
+            if (isUncommitted(history.getSelectionModel().getSelectedItem()))
                 details.showUncommitted(changed);
             return;
         }
@@ -262,17 +289,19 @@ class HistoryPane extends BorderPane
                                     "", null, null));
         rows.addAll(commits);
 
-        // Keep selection of the same commit
-        final CommitInfo selected = getSelected();
+        // Keep selection of the same commits, or of the 'uncommitted' row
+        final CommitInfo focus = history.getSelectionModel().getSelectedItem();
+        final List<String> selected = history.getSelectionModel().getSelectedItems().stream().map(CommitInfo::id).toList();
         details.clear();
         history.getItems().setAll(rows);
-        if (selected != null)
-            for (CommitInfo row : rows)
-                if (row.id().equals(selected.id()))
-                {
-                    history.getSelectionModel().select(row);
-                    break;
-                }
+        for (int i=0; i<rows.size(); ++i)
+            if (selected.contains(rows.get(i).id())  &&  (focus == null  ||  ! rows.get(i).id().equals(focus.id())))
+                history.getSelectionModel().select(i);
+        // Select the focused row last, its details are shown
+        if (focus != null)
+            for (int i=0; i<rows.size(); ++i)
+                if (rows.get(i).id().equals(focus.id()))
+                    history.getSelectionModel().select(i);
     }
 
     /** @return Description of what's shown: Commits with refs, current branch, uncommitted files */

@@ -69,6 +69,9 @@ import org.eclipse.jgit.lib.PersonIdent;
 import org.eclipse.jgit.lib.ProgressMonitor;
 import org.eclipse.jgit.lib.RebaseTodoLine;
 import org.eclipse.jgit.lib.Ref;
+import org.eclipse.jgit.lib.ReflogEntry;
+import org.eclipse.jgit.lib.ReflogReader;
+import org.eclipse.jgit.lib.Config;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.lib.RepositoryState;
 import org.eclipse.jgit.lib.StoredConfig;
@@ -87,7 +90,9 @@ import org.eclipse.jgit.revwalk.RevSort;
 import org.eclipse.jgit.revwalk.RevTree;
 import org.eclipse.jgit.revwalk.RevWalk;
 import org.eclipse.jgit.revwalk.filter.RevFilter;
+import org.eclipse.jgit.storage.file.FileBasedConfig;
 import org.eclipse.jgit.storage.file.FileRepositoryBuilder;
+import org.eclipse.jgit.util.FS;
 import org.eclipse.jgit.transport.CredentialsProvider;
 import org.eclipse.jgit.transport.PushResult;
 import org.eclipse.jgit.transport.RefLeaseSpec;
@@ -239,7 +244,8 @@ public class GitRepository implements AutoCloseable
     public record State(String branch, FileStatus status, List<CommitInfo> log,
                         List<BranchInfo> branches, Map<String, List<RemoteBranch>> remotes,
                         Map<String, String> remote_urls,
-                        List<TagInfo> tags, List<StashInfo> stashes, List<SubmoduleInfo> submodules) {}
+                        List<TagInfo> tags, List<StashInfo> stashes, List<SubmoduleInfo> submodules,
+                        List<ReflogInfo> reflog) {}
 
     private final Git git;
 
@@ -368,7 +374,8 @@ public class GitRepository implements AutoCloseable
     public synchronized State getState(final int log_count, final boolean all_branches, final String search) throws Exception
     {
         return new State(getBranch(), getStatus(), getLog(log_count, all_branches, search),
-                         getBranches(), getRemoteBranches(), getRemoteUrls(), getTags(), getStashes(), getSubmodules());
+                         getBranches(), getRemoteBranches(), getRemoteUrls(), getTags(), getStashes(), getSubmodules(),
+                         getReflog(MAX_REFLOG));
     }
 
     /** @return URL of each remote, by remote name */
@@ -2353,6 +2360,201 @@ public class GitRepository implements AutoCloseable
             config.save();
             sub_git.reset().setMode(ResetType.HARD).setRef(recorded.name()).call();
         }
+    }
+
+    /** Maximum number of reflog entries read for the state */
+    static final int MAX_REFLOG = 500;
+
+    /** Entry of the reflog: Where HEAD pointed, and why
+     *  @param id Commit that HEAD pointed to
+     *  @param old_id Previous commit
+     *  @param comment What moved HEAD, for example "commit: message" or "reset: moving to HEAD~1"
+     *  @param who Who did it
+     *  @param date When
+     */
+    public record ReflogInfo(String id, String old_id, String comment, String who, Instant date) {}
+
+    /** @param max Maximum number of entries
+     *  @return Reflog of HEAD, newest first, empty if there is none
+     */
+    public synchronized List<ReflogInfo> getReflog(final int max) throws Exception
+    {
+        final List<ReflogInfo> result = new ArrayList<>();
+        final ReflogReader reader = git.getRepository().getReflogReader(Constants.HEAD);
+        if (reader == null)
+            return result;
+        for (ReflogEntry entry : reader.getReverseEntries(max))
+        {
+            final PersonIdent who = entry.getWho();
+            result.add(new ReflogInfo(entry.getNewId().name(), entry.getOldId().name(), entry.getComment(),
+                                      who.getName(), who.getWhenAsInstant()));
+        }
+        return result;
+    }
+
+    /** @param ids Commit ids
+     *  @return Same commits, oldest (ancestors) first
+     */
+    public synchronized List<String> sortOldestFirst(final Collection<String> ids) throws Exception
+    {
+        final List<String> result = new ArrayList<>();
+        try (RevWalk walk = new RevWalk(git.getRepository()))
+        {
+            final Set<ObjectId> selected = new HashSet<>();
+            for (String id : ids)
+            {
+                final RevCommit commit = walk.parseCommit(ObjectId.fromString(id));
+                selected.add(commit.getId());
+                walk.markStart(commit);
+            }
+            walk.sort(RevSort.TOPO, true);
+            walk.sort(RevSort.REVERSE, true);
+            for (RevCommit commit : walk)
+                if (selected.contains(commit.getId()))
+                    result.add(commit.name());
+        }
+        return result;
+    }
+
+    /** Cherry-pick several commits, oldest first, stopping at a conflict
+     *  @param ids Commit ids
+     *  @return <code>true</code> if it stopped with conflicts
+     */
+    public synchronized boolean cherryPick(final Collection<String> ids) throws Exception
+    {
+        for (String id : sortOldestFirst(ids))
+            if (cherryPick(id))
+                return true;
+        return false;
+    }
+
+    /** Revert several commits, newest first, stopping at a conflict
+     *  @param ids Commit ids
+     *  @return <code>true</code> if it stopped with conflicts
+     */
+    public synchronized boolean revert(final Collection<String> ids) throws Exception
+    {
+        final List<String> sorted = new ArrayList<>(sortOldestFirst(ids));
+        java.util.Collections.reverse(sorted);
+        for (String id : sorted)
+            if (revert(id))
+                return true;
+        return false;
+    }
+
+    // --- Git configuration --------------------------------------------------------
+
+    /** Entry of a git configuration file
+     *  @param key Section, optional subsection, name, for example "user.name" or "remote.origin.url"
+     *  @param value Value
+     */
+    public record ConfigEntry(String key, String value) {}
+
+    /** @return Configuration file of the user, '~/.gitconfig' */
+    static File getUserConfigFile()
+    {
+        return new File(FS.DETECTED.userHome(), Constants.DOT_GIT + "config");
+    }
+
+    /** @param global User configuration, or the one of this repository?
+     *  @return Configuration file, loaded, without inherited settings
+     */
+    private FileBasedConfig loadConfig(final boolean global) throws Exception
+    {
+        final File file = global ? getUserConfigFile() : new File(git.getRepository().getDirectory(), Constants.CONFIG);
+        final FileBasedConfig config = new FileBasedConfig(null, file, FS.DETECTED);
+        if (file.exists())
+            config.load();
+        return config;
+    }
+
+    /** @param config Configuration
+     *  @return Entries, in the order of sections; keys with several values have several entries
+     */
+    static List<ConfigEntry> readConfig(final Config config)
+    {
+        final List<ConfigEntry> result = new ArrayList<>();
+        for (String section : config.getSections())
+        {
+            for (String name : config.getNames(section))
+                for (String value : config.getStringList(section, null, name))
+                    result.add(new ConfigEntry(section + "." + name, value));
+            for (String subsection : config.getSubsections(section))
+                for (String name : config.getNames(section, subsection))
+                    for (String value : config.getStringList(section, subsection, name))
+                        result.add(new ConfigEntry(section + "." + subsection + "." + name, value));
+        }
+        return result;
+    }
+
+    /** @param entries Entries
+     *  @return Values by key, keys in order of first appearance
+     */
+    private static Map<String, List<String>> group(final List<ConfigEntry> entries)
+    {
+        final Map<String, List<String>> result = new LinkedHashMap<>();
+        for (ConfigEntry entry : entries)
+            result.computeIfAbsent(entry.key().trim(), k -> new ArrayList<>()).add(entry.value());
+        return result;
+    }
+
+    /** Update configuration to have exactly the given entries
+     *
+     *  <p>Only changed keys are written, other content of the file remains.
+     *
+     *  @param config Configuration
+     *  @param entries Desired entries
+     *  @throws Exception if a key is not 'section.name' or 'section.subsection.name'
+     */
+    static void writeConfig(final StoredConfig config, final List<ConfigEntry> entries) throws Exception
+    {
+        final Map<String, List<String>> before = group(readConfig(config));
+        final Map<String, List<String>> after = group(entries);
+        for (String key : before.keySet())
+            if (! after.containsKey(key))
+            {
+                final String[] parts = splitKey(key);
+                config.unset(parts[0], parts[1], parts[2]);
+            }
+        for (Map.Entry<String, List<String>> entry : after.entrySet())
+            if (! entry.getValue().equals(before.get(entry.getKey())))
+            {
+                final String[] parts = splitKey(entry.getKey());
+                config.setStringList(parts[0], parts[1], parts[2], entry.getValue());
+            }
+        config.save();
+    }
+
+    /** @param key "section.name" or "section.subsection.name"
+     *  @return Section, subsection or <code>null</code>, name
+     */
+    private static String[] splitKey(final String key) throws Exception
+    {
+        final int first = key.indexOf('.'), last = key.lastIndexOf('.');
+        if (first <= 0  ||  last >= key.length() - 1)
+            throw new Exception(Messages.ConfigBadKey + ": " + key);
+        return new String[]
+        {
+            key.substring(0, first),
+            first == last ? null : key.substring(first + 1, last),
+            key.substring(last + 1)
+        };
+    }
+
+    /** @param global User configuration, or the one of this repository?
+     *  @return Entries
+     */
+    public synchronized List<ConfigEntry> getConfig(final boolean global) throws Exception
+    {
+        return readConfig(loadConfig(global));
+    }
+
+    /** @param global User configuration, or the one of this repository?
+     *  @param entries New entries
+     */
+    public synchronized void setConfig(final boolean global, final List<ConfigEntry> entries) throws Exception
+    {
+        writeConfig(loadConfig(global), entries);
     }
 
     /** Pull from the configured upstream

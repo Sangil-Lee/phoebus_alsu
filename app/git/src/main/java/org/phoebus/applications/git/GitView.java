@@ -23,6 +23,8 @@ import org.phoebus.applications.git.GitRepository.BranchInfo;
 import org.phoebus.applications.git.GitRepository.ChangeType;
 import org.phoebus.applications.git.GitRepository.CommitFile;
 import org.phoebus.applications.git.GitRepository.CommitInfo;
+import org.phoebus.applications.git.GitRepository.ConfigEntry;
+import org.phoebus.applications.git.GitRepository.ReflogInfo;
 import org.phoebus.applications.git.GitRepository.FileStatus;
 import org.phoebus.applications.git.GitRepository.PushOptions;
 import org.phoebus.applications.git.GitRepository.RemoteBranch;
@@ -113,6 +115,9 @@ public class GitView implements AppInstance
     /** Compare, restore, merge tool */
     private final GitActions git_actions;
 
+    /** Reflog of HEAD */
+    private final ReflogPane reflog;
+
     /** Currently open repository, accessed from UI thread and jobs */
     private volatile GitRepository repo;
 
@@ -171,6 +176,20 @@ public class GitView implements AppInstance
         file_status = new FileStatusPane(() -> repo, ex -> showError(Messages.Diff, ex), new FileStatusActions(), git_actions);
         history = new HistoryPane(() -> repo, ex -> showError(Messages.Diff, ex), all_branches, new HistoryActions(), git_actions);
         stash_diff = new DiffPane(() -> repo, ex -> showError(Messages.Diff, ex));
+        reflog = new ReflogPane(() -> repo, ex -> showError(Messages.Diff, ex), new ReflogPane.Actions()
+        {
+            @Override
+            public void createBranch(final String commit)
+            {
+                GitView.this.createBranch(commit);
+            }
+
+            @Override
+            public void reset(final ReflogInfo entry)
+            {
+                GitView.this.reset(new CommitInfo(entry.id(), entry.comment(), entry.who(), entry.date(), null));
+            }
+        }, git_actions, this::showFileHistory);
         sidebar = new GitSidebar(new SidebarActions());
 
         final SplitPane split = new SplitPane(sidebar, layout);
@@ -241,11 +260,13 @@ public class GitView implements AppInstance
         clone.setOnAction(event -> cloneRepository());
         final Button create = new Button(Messages.NewRepository);
         create.setOnAction(event -> createRepository());
+        final Button config = new Button(Messages.GitConfigButton);
+        config.setOnAction(event -> editConfig());
         updateRecentMenu();
         open_files.setOnShowing(event -> updateOpenFilesMenu());
         // Menu needs at least one item to show
         open_files.getItems().add(new MenuItem());
-        repo_bar.getChildren().setAll(new Label(Messages.Repository), repo_path, recent, browse, clone, create, open_files);
+        repo_bar.getChildren().setAll(new Label(Messages.Repository), repo_path, recent, browse, clone, create, open_files, config);
         repo_bar.setAlignment(Pos.CENTER_LEFT);
         repo_bar.setPadding(new Insets(2, 5, 4, 5));
         HBox.setHgrow(repo_path, Priority.ALWAYS);
@@ -570,23 +591,29 @@ public class GitView implements AppInstance
         }
 
         @Override
-        public void cherryPick(final CommitInfo commit)
+        public void cherryPick(final List<CommitInfo> commits)
         {
-            if (confirm(Messages.CherryPick, Messages.CherryPick + ": " + commit.message()))
-                runMayConflict(Messages.CherryPick, git -> git.cherryPick(commit.id()));
+            if (confirm(Messages.CherryPick, Messages.CherryPick + ":\n" + describe(commits)))
+                runMayConflict(Messages.CherryPick, git -> git.cherryPick(commits.stream().map(CommitInfo::id).toList()));
         }
 
         @Override
-        public void revert(final CommitInfo commit)
+        public void revert(final List<CommitInfo> commits)
         {
-            if (confirm(Messages.Revert, Messages.Revert + ": " + commit.message()))
-                runMayConflict(Messages.Revert, git -> git.revert(commit.id()));
+            if (confirm(Messages.Revert, Messages.Revert + ":\n" + describe(commits)))
+                runMayConflict(Messages.Revert, git -> git.revert(commits.stream().map(CommitInfo::id).toList()));
+        }
+
+        /** @return One line per commit */
+        private String describe(final List<CommitInfo> commits)
+        {
+            return commits.stream().map(c -> c.id().substring(0, 7) + "  " + c.message()).collect(Collectors.joining("\n"));
         }
 
         @Override
-        public void logbook(final CommitInfo commit)
+        public void logbook(final List<CommitInfo> commits)
         {
-            openLogbook(List.of(commit.id()), null);
+            openLogbook(commits.stream().map(CommitInfo::id).toList(), null);
         }
 
         @Override
@@ -596,11 +623,11 @@ public class GitView implements AppInstance
         }
 
         @Override
-        public void createPatch(final CommitInfo commit)
+        public void createPatch(final List<CommitInfo> commits)
         {
-            final File file = choosePatchFile(commit.id().substring(0, 7) + ".patch", true);
+            final File file = choosePatchFile(commits.get(0).id().substring(0, 7) + ".patch", true);
             if (file != null)
-                writePatch(file, git -> git.formatPatch(List.of(commit.id())));
+                writePatch(file, git -> git.formatPatch(commits.stream().map(CommitInfo::id).toList()));
         }
 
         @Override
@@ -903,6 +930,12 @@ public class GitView implements AppInstance
             layout.setCenter(history);
             if (commit != null)
                 history.showCommit(commit);
+        }
+
+        @Override
+        public void showReflog()
+        {
+            layout.setCenter(reflog);
         }
 
         @Override
@@ -1557,6 +1590,33 @@ public class GitView implements AppInstance
         runAndRefresh(Messages.RemoteSettings, git -> git.setRemoteSettings(update));
     }
 
+    /** Edit git configuration of repository and user */
+    private void editConfig()
+    {
+        final GitRepository current = repo;
+        if (current == null)
+            return;
+        schedule(Messages.GitConfig, monitor ->
+        {
+            try
+            {
+                final List<ConfigEntry> local = current.getConfig(false);
+                final List<ConfigEntry> user = current.getConfig(true);
+                Platform.runLater(() ->
+                    new GitConfigDialog(layout, local, user).showAndWait().ifPresent(entries ->
+                        runAndRefresh(Messages.GitConfig, git ->
+                        {
+                            git.setConfig(false, entries.get(0));
+                            git.setConfig(true, entries.get(1));
+                        })));
+            }
+            catch (Exception ex)
+            {
+                showError(Messages.GitConfig, ex);
+            }
+        });
+    }
+
     /** Prompt for pull options and pull */
     private void pull()
     {
@@ -1859,6 +1919,7 @@ public class GitView implements AppInstance
                                            .map(b -> Constants.R_HEADS + b.name())
                                            .findFirst().orElse(null);
         history.setCommits(state.log(), current_branch, log_count, getUncommittedFiles(state.status()));
+        reflog.setEntries(state.reflog());
         stash_diff.clear();
         // Update side bar last, it may re-select a branch and thus a commit in the history
         sidebar.update(state);

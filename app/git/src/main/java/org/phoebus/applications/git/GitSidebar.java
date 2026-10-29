@@ -56,6 +56,8 @@ class GitSidebar extends TreeView<Object>
         void editRemote(String name, String url);
         /** Remove a remote, after asking user */
         void removeRemote(String name);
+        /** Show the reflog */
+        void showReflog();
         /** @param ref Branch or tag to compare with the current branch */
         void compareWithCurrent(String ref);
         /** @param paths Submodules to initialize and update, empty for all */
@@ -69,16 +71,20 @@ class GitSidebar extends TreeView<Object>
     /** Section header */
     private record Header(String label) {}
 
+    /** View of the workspace section */
+    private enum View { FILE_STATUS, HISTORY, REFLOG }
+
     /** Entry in the workspace section */
-    private record Workspace(String label, boolean history) {}
+    private record Workspace(String label, View view) {}
 
     /** Remote, parent of its branches */
     private record Remote(String name, String url) {}
 
     private final Actions actions;
 
-    private final TreeItem<Object> file_status = new TreeItem<>(new Workspace(Messages.FileStatus, false));
-    private final TreeItem<Object> history = new TreeItem<>(new Workspace(Messages.History, true));
+    private final TreeItem<Object> file_status = new TreeItem<>(new Workspace(Messages.FileStatus, View.FILE_STATUS));
+    private final TreeItem<Object> history = new TreeItem<>(new Workspace(Messages.History, View.HISTORY));
+    private final TreeItem<Object> reflog = new TreeItem<>(new Workspace(Messages.Reflog, View.REFLOG));
     private final TreeItem<Object> branches = new TreeItem<>(new Header(Messages.HeaderBranches));
     private final TreeItem<Object> tags = new TreeItem<>(new Header(Messages.HeaderTags));
     private final TreeItem<Object> remotes = new TreeItem<>(new Header(Messages.HeaderRemotes));
@@ -96,7 +102,7 @@ class GitSidebar extends TreeView<Object>
         this.actions = actions;
 
         final TreeItem<Object> workspace = new TreeItem<>(new Header(Messages.HeaderWorkspace));
-        workspace.getChildren().setAll(List.of(file_status, history));
+        workspace.getChildren().setAll(List.of(file_status, history, reflog));
         workspace.setExpanded(true);
         branches.setExpanded(true);
 
@@ -119,10 +125,12 @@ class GitSidebar extends TreeView<Object>
     {
         if (value instanceof Workspace ws)
         {
-            if (ws.history())
-                actions.showHistory(null);
-            else
-                actions.showFileStatus();
+            switch (ws.view())
+            {
+            case HISTORY -> actions.showHistory(null);
+            case REFLOG  -> actions.showReflog();
+            default      -> actions.showFileStatus();
+            }
         }
         else if (value instanceof BranchInfo branch)
             actions.showHistory(branch.commit());
