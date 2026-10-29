@@ -253,8 +253,9 @@ class GitActions
         final List<String> dirty = OpenFiles.list(git.getWorkTree())
                                             .stream()
                                             .filter(open -> open.item().isDirty())
-                                            .map(open -> open.file().getAbsolutePath())
-                                            .filter(file -> paths.stream().anyMatch(path -> file.equals(new File(git.getWorkTree(), path).getAbsolutePath())))
+                                            .map(open -> open.file())
+                                            .filter(file -> paths.stream().anyMatch(path -> OpenFiles.isSame(file, new File(git.getWorkTree(), path))))
+                                            .map(File::getAbsolutePath)
                                             .toList();
         if (! dirty.isEmpty())
             text.append("\n\n").append(Messages.RestoreDirty).append("\n").append(String.join("\n", dirty));
@@ -341,7 +342,11 @@ class GitActions
                 try (Stream<Path> files = Files.walk(dir))
                 {
                     for (Path file : files.sorted(Comparator.reverseOrder()).toList())
+                    {
+                        // Exported files are read-only, which prevents deleting them on Windows
+                        file.toFile().setWritable(true);
                         Files.deleteIfExists(file);
+                    }
                 }
                 catch (IOException ex)
                 {

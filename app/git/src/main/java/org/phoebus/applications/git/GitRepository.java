@@ -4,6 +4,8 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.OutputStream;
 import java.io.File;
+import java.io.InputStream;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -25,7 +27,6 @@ import java.util.stream.Collectors;
 
 import org.eclipse.jgit.api.AddCommand;
 import org.eclipse.jgit.api.CheckoutCommand.Stage;
-import org.eclipse.jgit.api.ApplyResult;
 import org.eclipse.jgit.api.CherryPickResult;
 import org.eclipse.jgit.api.CreateBranchCommand.SetupUpstreamMode;
 import org.eclipse.jgit.api.Git;
@@ -44,6 +45,12 @@ import org.eclipse.jgit.submodule.SubmoduleStatus;
 import org.eclipse.jgit.submodule.SubmoduleStatusType;
 import org.eclipse.jgit.submodule.SubmoduleWalk;
 import org.eclipse.jgit.api.TransportCommand;
+import org.eclipse.jgit.attributes.Attributes;
+import org.eclipse.jgit.lib.CoreConfig.EolStreamType;
+import org.eclipse.jgit.lib.ObjectLoader;
+import org.eclipse.jgit.treewalk.TreeWalk.OperationType;
+import org.eclipse.jgit.treewalk.WorkingTreeOptions;
+import org.eclipse.jgit.util.io.EolStreamTypeUtil;
 import org.eclipse.jgit.blame.BlameResult;
 import org.eclipse.jgit.diff.ContentSource;
 import org.eclipse.jgit.diff.DiffConfig;
@@ -1213,7 +1220,33 @@ public class GitRepository implements AutoCloseable
     private ContentSource getSource(final Revision revision, final ObjectReader reader)
     {
         if (revision instanceof Revision.WorkTree)
-            return ContentSource.create(new FileTreeIterator(git.getRepository()));
+            return new ContentSource()
+            {
+                @Override
+                public long size(final String path, final ObjectId id) throws IOException
+                {
+                    return open(path, id).getSize();
+                }
+
+                @Override
+                public ObjectLoader open(final String path, final ObjectId id) throws IOException
+                {
+                    // Content with line ends of the repository, comparable to the other revision
+                    try
+                    {
+                        final byte[] content = readWorkTree(path);
+                        return new ObjectLoader.SmallObject(Constants.OBJ_BLOB, content == null ? NO_CONTENT : content);
+                    }
+                    catch (IOException ex)
+                    {
+                        throw ex;
+                    }
+                    catch (Exception ex)
+                    {
+                        throw new IOException(ex);
+                    }
+                }
+            };
         return ContentSource.create(reader);
     }
 
@@ -1330,8 +1363,7 @@ public class GitRepository implements AutoCloseable
         if (! source.equals(path))
         {
             // Older version of a renamed file: Write content to current path
-            file.getParentFile().mkdirs();
-            Files.write(file.toPath(), content == null ? NO_CONTENT : content);
+            writeWorkTree(path, content == null ? NO_CONTENT : content);
             if (index_too)
                 git.add().addFilepattern(path).call();
             return;
@@ -1351,9 +1383,64 @@ public class GitRepository implements AutoCloseable
         if (content == null)
             Files.deleteIfExists(file.toPath());
         else
+            writeWorkTree(path, content);
+    }
+
+    /** @param path File path
+     *  @param operation Check out (write to work tree) or check in (read from work tree)?
+     *  @return Line end conversion for the file, from core.autocrlf, core.eol, .gitattributes
+     */
+    private EolStreamType getEolStreamType(final String path, final OperationType operation) throws Exception
+    {
+        final Repository repository = git.getRepository();
+        try (TreeWalk walk = new TreeWalk(repository))
         {
-            file.getParentFile().mkdirs();
-            Files.write(file.toPath(), content);
+            walk.setOperationType(operation);
+            walk.addTree(new FileTreeIterator(repository));
+            walk.addTree(new DirCacheIterator(repository.readDirCache()));
+            walk.setRecursive(true);
+            walk.setFilter(PathFilter.create(path));
+            if (walk.next())
+                return walk.getEolStreamType(operation);
+        }
+        return EolStreamTypeUtil.detectStreamType(operation, repository.getConfig().get(WorkingTreeOptions.KEY), new Attributes());
+    }
+
+    /** Write a file to the work tree, converting line ends like a checkout
+     *
+     *  <p>Content from the repository or index has the line ends of the repository,
+     *  for example LF, while the work tree may use CRLF (core.autocrlf=true on Windows).
+     *
+     *  @param path File path
+     *  @param content Content as in the repository
+     */
+    public synchronized void writeWorkTree(final String path, final byte[] content) throws Exception
+    {
+        final Path file = new File(getWorkTree(), path).toPath();
+        Files.createDirectories(file.getParent());
+        // File must exist for its attributes to be found
+        if (! Files.exists(file))
+            Files.createFile(file);
+        final EolStreamType eol = getEolStreamType(path, OperationType.CHECKOUT_OP);
+        try (OutputStream out = EolStreamTypeUtil.wrapOutputStream(Files.newOutputStream(file), eol))
+        {
+            out.write(content);
+        }
+    }
+
+    /** Read a file of the work tree, converting line ends like 'git add'
+     *  @param path File path
+     *  @return Content as it would be in the repository, <code>null</code> if the file does not exist
+     */
+    private byte[] readWorkTree(final String path) throws Exception
+    {
+        final Path file = new File(getWorkTree(), path).toPath();
+        if (! Files.isRegularFile(file))
+            return null;
+        final EolStreamType eol = getEolStreamType(path, OperationType.CHECKIN_OP);
+        try (InputStream in = EolStreamTypeUtil.wrapInputStream(Files.newInputStream(file), eol))
+        {
+            return in.readAllBytes();
         }
     }
 
@@ -1498,6 +1585,21 @@ public class GitRepository implements AutoCloseable
     static byte[] applyHunk(final byte[] content, final HunkHeader hunk, final boolean reverse,
                             final Set<Integer> selected) throws Exception
     {
+        return applyHunk(content, hunk, reverse, selected, false);
+    }
+
+    /** Apply one hunk to file content
+     *  @param content Content of the file on the old side (or new side when reversed)
+     *  @param hunk Hunk of a unified diff
+     *  @param reverse Apply in reverse, i.e. undo the hunk?
+     *  @param selected Indices of lines in the hunk to apply, <code>null</code> to apply all
+     *  @param search If the lines differ at the hunk's position, look for them before or after, like 'git apply'?
+     *  @return Updated content
+     *  @throws Exception if the hunk does not match the content
+     */
+    static byte[] applyHunk(final byte[] content, final HunkHeader hunk, final boolean reverse,
+                            final Set<Integer> selected, final boolean search) throws Exception
+    {
         // Lines of the hunk without the '@@' header line
         final List<byte[]> body = splitLines(hunk.getBuffer(), hunk.getStartOffset(), hunk.getEndOffset());
         body.remove(0);
@@ -1542,14 +1644,21 @@ public class GitRepository implements AutoCloseable
         final int start = reverse ? hunk.getNewStartLine() : hunk.getOldImage().getStartLine();
         final int count = reverse ? hunk.getNewLineCount() : hunk.getOldImage().getLineCount();
         // For an empty range, the start is the line after which to insert
-        final int position = count == 0 ? start : start - 1;
+        final int expected = count == 0 ? start : start - 1;
 
         final List<byte[]> file = splitLines(content, 0, content.length);
-        if (position < 0  ||  position + from.size() > file.size())
+        int position = -1;
+        if (matches(file, expected, from))
+            position = expected;
+        else if (search)
+            // Nearest position where the lines match
+            for (int offset=1; position < 0  &&  offset <= file.size(); ++offset)
+                if (matches(file, expected - offset, from))
+                    position = expected - offset;
+                else if (matches(file, expected + offset, from))
+                    position = expected + offset;
+        if (position < 0)
             throw new Exception("The file changed, refresh and try again");
-        for (int i=0; i<from.size(); ++i)
-            if (! java.util.Arrays.equals(file.get(position + i), from.get(i).text()))
-                throw new Exception("The file changed, refresh and try again");
 
         // Line end for a line that had none but is now followed by others
         final byte[] newline = lines.stream().anyMatch(l -> endsWith(l.text(), "\r\n")) ? "\r\n".getBytes() : "\n".getBytes();
@@ -1566,6 +1675,21 @@ public class GitRepository implements AutoCloseable
         for (int i=position + from.size(); i<file.size(); ++i)
             out.write(file.get(i));
         return out.toByteArray();
+    }
+
+    /** @param file Lines of a file
+     *  @param position Position in file
+     *  @param lines Expected lines
+     *  @return Does the file have those lines at that position?
+     */
+    private static boolean matches(final List<byte[]> file, final int position, final List<HunkLine> lines)
+    {
+        if (position < 0  ||  position + lines.size() > file.size())
+            return false;
+        for (int i=0; i<lines.size(); ++i)
+            if (! java.util.Arrays.equals(file.get(position + i), lines.get(i).text()))
+                return false;
+        return true;
     }
 
     /** Apply a block of changed lines
@@ -1779,9 +1903,11 @@ public class GitRepository implements AutoCloseable
     {
         final Repository repository = git.getRepository();
         final byte[] diff = getRawDiff(path, new DirCacheIterator(repository.readDirCache()), new FileTreeIterator(repository));
-        final Path file = new File(getWorkTree(), path).toPath();
-        final byte[] content = applyHunk(Files.readAllBytes(file), getHunk(diff, hunk), true, lines);
-        Files.write(file, content);
+        // Diff of work tree is computed with line ends of the repository
+        final byte[] original = readWorkTree(path);
+        if (original == null)
+            throw new Exception(path + " does not exist");
+        writeWorkTree(path, applyHunk(original, getHunk(diff, hunk), true, lines));
     }
 
     /** @param old_name Current name of local branch
@@ -2232,12 +2358,71 @@ public class GitRepository implements AutoCloseable
      */
     public synchronized List<String> applyPatch(final byte[] patch) throws Exception
     {
-        final ApplyResult result = git.apply().setPatch(new ByteArrayInputStream(patch)).call();
-        final File top = getWorkTree().getAbsoluteFile();
-        return result.getUpdatedFiles().stream()
-                     .map(file -> top.toPath().relativize(file.getAbsoluteFile().toPath()).toString().replace(File.separatorChar, '/'))
-                     .sorted()
-                     .toList();
+        final Patch parsed = new Patch();
+        parsed.parse(new ByteArrayInputStream(patch));
+        if (! parsed.getErrors().isEmpty())
+            throw new Exception(parsed.getErrors().get(0).getMessage());
+        if (parsed.getFiles().isEmpty())
+            throw new Exception("No changes in patch");
+        // Compute all files first, change the work tree only when the complete patch applies.
+        // Content has the line ends of the repository, written like a checkout
+        final Map<String, byte[]> result = new LinkedHashMap<>();
+        final List<String> problems = new ArrayList<>();
+        for (FileHeader file : parsed.getFiles())
+        {
+            final String old_path = file.getOldPath(), new_path = file.getNewPath();
+            try
+            {
+                if (file.getPatchType() != FileHeader.PatchType.UNIFIED)
+                    throw new Exception("binary patch is not supported");
+                if (file.getChangeType() == DiffEntry.ChangeType.ADD)
+                {
+                    if (result.get(new_path) != null  ||  (! result.containsKey(new_path)  &&  new File(getWorkTree(), new_path).exists()))
+                        throw new Exception("already exists");
+                    result.put(new_path, applyHunks(NO_CONTENT, file));
+                    continue;
+                }
+                final byte[] original = result.containsKey(old_path) ? result.get(old_path) : readWorkTree(old_path);
+                if (original == null)
+                    throw new Exception("does not exist");
+                if (file.getChangeType() == DiffEntry.ChangeType.DELETE)
+                {
+                    applyHunks(original, file);
+                    result.put(old_path, null);
+                    continue;
+                }
+                final byte[] updated = applyHunks(original, file);
+                if (file.getChangeType() == DiffEntry.ChangeType.RENAME)
+                    result.put(old_path, null);
+                result.put(new_path, updated);
+            }
+            catch (Exception ex)
+            {
+                problems.add((new_path == null  ||  new_path.equals(DiffEntry.DEV_NULL) ? old_path : new_path) + ": " + ex.getMessage());
+            }
+        }
+        if (! problems.isEmpty())
+            throw new Exception("Patch does not apply, nothing was changed:\n" + String.join("\n", problems));
+        for (Map.Entry<String, byte[]> entry : result.entrySet())
+            if (entry.getValue() == null)
+                Files.deleteIfExists(new File(getWorkTree(), entry.getKey()).toPath());
+            else
+                writeWorkTree(entry.getKey(), entry.getValue());
+        return result.keySet().stream().sorted().toList();
+    }
+
+    /** @param content File content
+     *  @param file Patch for the file
+     *  @return Content with all hunks applied
+     */
+    private static byte[] applyHunks(final byte[] content, final FileHeader file) throws Exception
+    {
+        // Last hunk first, so the positions of earlier hunks remain valid
+        byte[] result = content;
+        final List<? extends HunkHeader> hunks = file.getHunks();
+        for (int i=hunks.size()-1; i>=0; --i)
+            result = applyHunk(result, hunks.get(i), false, null, true);
+        return result;
     }
 
     // --- Submodules ------------------------------------------------------------

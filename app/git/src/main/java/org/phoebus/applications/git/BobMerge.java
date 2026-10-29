@@ -283,6 +283,8 @@ class BobMerge
         final Transformer transformer = TransformerFactory.newInstance().newTransformer();
         transformer.setOutputProperty(OutputKeys.OMIT_XML_DECLARATION, "yes");
         transformer.setOutputProperty(OutputKeys.ENCODING, "UTF-8");
+        // Line separator of the platform would be used for line ends in text, e.g. CRLF on Windows
+        transformer.setOutputProperty("{http://xml.apache.org/xalan}line-separator", "\n");
         final StringWriter out = new StringWriter();
         transformer.transform(new DOMSource(doc), new StreamResult(out));
         final String text = new String(ours, StandardCharsets.UTF_8);
@@ -294,9 +296,12 @@ class BobMerge
                 ++end;
             declaration = text.substring(0, end);
         }
-        String body = out.toString();
+        // Parser turned CRLF into LF, restore line ends of 'ours'
+        String body = out.toString().replace("\r\n", "\n");
         if (text.endsWith("\n")  &&  ! body.endsWith("\n"))
             body += "\n";
+        if (text.contains("\r\n"))
+            body = body.replace("\n", "\r\n");
         return (declaration + body).getBytes(StandardCharsets.UTF_8);
     }
 

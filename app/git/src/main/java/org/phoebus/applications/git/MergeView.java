@@ -288,7 +288,7 @@ class MergeView
         }
         actions.run(Messages.MergeTool, git ->
         {
-            Files.write(new File(git.getWorkTree(), path).toPath(), content);
+            git.writeWorkTree(path, content);
             git.stage(List.of(path));
             tab.prepareToClose();
             Platform.runLater(tab::close);
@@ -478,7 +478,7 @@ class MergeView
         final byte[] content = model.getResult();
         actions.run(Messages.MergeTool, git ->
         {
-            Files.write(new File(git.getWorkTree(), path).toPath(), content);
+            git.writeWorkTree(path, content);
             if (unresolved == 0)
             {
                 git.stage(List.of(path));

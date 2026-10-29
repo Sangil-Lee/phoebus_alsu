@@ -3,6 +3,8 @@ package org.phoebus.applications.git;
 import java.io.File;
 import java.nio.file.ClosedWatchServiceException;
 import java.nio.file.FileSystems;
+import java.nio.file.WatchEvent;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardWatchEventKinds;
 import java.nio.file.WatchKey;
@@ -104,12 +106,14 @@ class RepositoryWatcher implements AutoCloseable
             {
                 // Wait for a change, then collect changes until it's quiet
                 WatchKey key = watcher.take();
+                boolean changed = false;
                 while (key != null)
                 {
-                    handle(key);
+                    changed |= handle(key);
                     key = watcher.poll(QUIET_MS, TimeUnit.MILLISECONDS);
                 }
-                on_change.run();
+                if (changed)
+                    on_change.run();
                 register();
             }
         }
@@ -123,16 +127,32 @@ class RepositoryWatcher implements AutoCloseable
         }
     }
 
-    /** Drain events of a key, forget directories that were deleted */
-    private void handle(final WatchKey key)
+    /** Drain events of a key, forget directories that were deleted
+     *  @return Is there a relevant change?
+     */
+    private boolean handle(final WatchKey key)
     {
-        // Details of the events don't matter, any change triggers a refresh
-        key.pollEvents();
+        boolean changed = false;
+        final Path dir = (Path) key.watchable();
+        for (WatchEvent<?> event : key.pollEvents())
+        {
+            // Windows reports a change inside a directory also as modification of the directory.
+            // Ignore that, the directory is either watched itself or ignored by git
+            if (event.kind() == StandardWatchEventKinds.ENTRY_MODIFY  &&
+                event.context() instanceof Path name  &&
+                Files.isDirectory(dir.resolve(name)))
+                continue;
+            changed = true;
+        }
         if (! key.reset())
+        {
             synchronized (watched)
             {
-                watched.remove((Path) key.watchable());
+                watched.remove(dir);
             }
+            changed = true;
+        }
+        return changed;
     }
 
     @Override

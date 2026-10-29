@@ -1,6 +1,7 @@
 package org.phoebus.applications.git;
 
 import java.io.File;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
@@ -55,10 +56,49 @@ class OpenFiles
      */
     static List<OpenFile> list(final File directory)
     {
-        final String prefix = directory.getAbsolutePath() + File.separator;
         return list().stream()
-                     .filter(open -> open.file().getAbsolutePath().startsWith(prefix))
+                     .filter(open -> isInside(open.file(), directory))
                      .toList();
+    }
+
+    /** @param file File, may not exist
+     *  @return Path for comparing files: Real path if possible, with the actual case of names on Windows
+     */
+    static Path canonical(final File file)
+    {
+        final File absolute = file.getAbsoluteFile();
+        try
+        {
+            return absolute.toPath().toRealPath();
+        }
+        catch (Exception ex)
+        {
+            // File does not exist, use real path of its directory
+            final File parent = absolute.getParentFile();
+            if (parent != null)
+                return canonical(parent).resolve(absolute.getName());
+            return absolute.toPath().normalize();
+        }
+    }
+
+    /** @param file File
+     *  @param directory Directory
+     *  @return Is the file in the directory, or below?
+     *          Compares paths, on Windows ignoring case
+     */
+    static boolean isInside(final File file, final File directory)
+    {
+        final Path path = canonical(file), dir = canonical(directory);
+        return ! path.equals(dir)  &&  path.startsWith(dir);
+    }
+
+    /** @param a File
+     *  @param b Other file
+     *  @return Is it the same file?
+     */
+    static boolean isSame(final File a, final File b)
+    {
+        return canonical(a).equals(canonical(b));
     }
 
     /** @param name File name

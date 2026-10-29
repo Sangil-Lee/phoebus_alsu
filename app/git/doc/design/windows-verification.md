@@ -134,3 +134,29 @@ parity 단계 5의 Git 설정 시나리오가 실제 `C:\Users\JEM\.gitconfig` �
 `HOME`/`%USERPROFILE%` 로 사용자 설정을 찾기 때문이다. 추가된 `[core] autocrlf = input` 은 되돌렸고,
 `user.name`/`user.email` 은 원래 값을 알 수 없어 사용자가 직접 복구해야 한다.
 이후 Windows 실행은 `HOME` 을 테스트 폴더로 지정해 격리했다.
+
+## 9. 단계 5 결과: 결함 수정과 재검증 (2026-10-29)
+
+| # | 수정 |
+|---|---|
+| D1~D3 | 작업 트리에 쓸 때 JGit checkout과 같은 줄바꿈 변환(`core.autocrlf`, `core.eol`, `.gitattributes`), 작업 트리를 읽어 hunk를 적용할 때 checkin 변환을 적용 (`GitRepository.writeWorkTree`/`readWorkTree`). 위젯 병합은 XML 직렬화의 줄바꿈을 LF로 고정하고 ours의 줄바꿈(LF/CRLF)을 유지 |
+| D4 | Patch 적용을 JGit `ApplyCommand` 대신 hunk 적용 코드로 구현: 줄바꿈 변환, 위치가 어긋난 hunk 찾기(`git apply` 처럼), 모든 파일이 맞을 때만 작업 트리 변경. `git apply` 와 같이 새 파일은 untracked |
+| D5 | 이름 변경 감지에서 작업 트리 내용을 checkin 변환해 비교 |
+| D6 | 꺼낸 임시 파일을 지우기 전에 쓰기 권한 복구 |
+| D7 | 경로 비교를 문자열 대신 실제 경로(`toRealPath`)의 `Path` 비교로 (Windows는 대소문자 무시) |
+| D8 | 폴더에 대한 수정 이벤트(Windows가 하위 변경을 상위 폴더로도 알림)는 무시 |
+| D9 | `/`·`\` 로 시작하는 참조를 저장소 밖 경로로 판단 |
+| D10 | D8 수정으로 해결: 쓸데없는 새로 고침이 stash diff를 지웠음 |
+
+테스트 환경: JUnit 확장 `GitTestSupport` 가 시스템 git 설정을 무시하고(테스트가 PC 설정에 좌우되지 않음),
+테스트마다 JGit이 연 pack 파일을 닫음(Windows 임시 폴더 삭제). CRLF 동작은 `CrlfTest` 가 저장소에
+`core.autocrlf=true` 를 설정해 Linux에서도 검증한다. 실행기는 `HOME` 을 테스트 폴더로 지정하고 경로를 `File` 로 조립한다.
+
+| 검증 | Windows | Linux |
+|---|---|---|
+| 단위 테스트 114 (새 `CrlfTest` 8 포함) | 114 통과 (시스템 `autocrlf=true` 그대로) | 114 통과 |
+| E2E 73, 연계 21, 로그북 12 | 모두 통과 | 모두 통과 |
+| EGit 동등 86 | 86 통과 | 86 통과 |
+| Windows 시나리오 23 (`autocrlf=true`) | 23 통과 | 해당 없음 |
+
+남은 항목: WS-13(사내 SSH/HTTPS), WS-15(성능), 네트워크 드라이브, `autocrlf` input/false 조합, 수동 확인(화면 배율·글꼴).

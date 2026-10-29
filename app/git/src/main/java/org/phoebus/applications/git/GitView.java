@@ -813,7 +813,8 @@ public class GitView implements AppInstance
      */
     private static String relative(final File work_tree, final File file)
     {
-        return work_tree.getAbsoluteFile().toPath().relativize(file.getAbsoluteFile().toPath())
+        // Real paths, so a file given with other case on Windows has the path that git uses
+        return OpenFiles.canonical(work_tree).relativize(OpenFiles.canonical(file))
                         .toString().replace(File.separatorChar, '/');
     }
 
@@ -822,11 +823,10 @@ public class GitView implements AppInstance
      */
     private static GitView findView(final File file)
     {
-        final String path = file.getAbsolutePath();
         for (GitView view : views)
         {
             final File work_tree = view.getWorkTree();
-            if (work_tree != null  &&  (path + File.separator).startsWith(work_tree.getAbsolutePath() + File.separator))
+            if (work_tree != null  &&  (OpenFiles.isSame(file, work_tree)  ||  OpenFiles.isInside(file, work_tree)))
                 return view;
         }
         return null;

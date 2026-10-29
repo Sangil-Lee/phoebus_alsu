@@ -140,7 +140,8 @@ class CommitCheck
             if (! isCheckable(reference))
                 continue;
             final Path referenced = Paths.get(reference);
-            if (referenced.isAbsolute())
+            // On Windows, "/some/path" is not 'absolute' (no drive) but also not relative to the display
+            if (referenced.isAbsolute()  ||  reference.startsWith("/")  ||  reference.startsWith("\\"))
             {
                 // Outside of the repository, may be installed elsewhere
                 if (! referenced.toFile().exists())
